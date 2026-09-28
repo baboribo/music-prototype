@@ -6,6 +6,16 @@ enum ArtworkTheme: String, CaseIterable, Hashable, Sendable {
     case midnight, coral, amber, forest, ocean, violet
 }
 
+/// Fixture shorthands so the tables below read as before.
+extension Artwork {
+    static let midnight = Artwork.theme(.midnight)
+    static let coral = Artwork.theme(.coral)
+    static let amber = Artwork.theme(.amber)
+    static let forest = Artwork.theme(.forest)
+    static let ocean = Artwork.theme(.ocean)
+    static let violet = Artwork.theme(.violet)
+}
+
 struct Track: Identifiable, Hashable, Sendable {
     let id: String
     let title: String
@@ -14,10 +24,12 @@ struct Track: Identifiable, Hashable, Sendable {
     let artistID: Artist.ID?
     let album: String
     let releaseID: Release.ID?
-    let artwork: ArtworkTheme
-    /// Fixture seconds for the local scrubber; no media asset is loaded.
-    let duration: Double
+    let artwork: Artwork
+    /// Seconds; nil where the service's listing omits it (Home shelves).
+    let duration: Double?
     var isExplicit = false
+    /// The service greys out rows it won't play here (region, removed uploads).
+    var isPlayable = true
 }
 
 /// YouTube Music labels releases as Album, Single or EP; the page grammar is shared.
@@ -36,17 +48,18 @@ enum ReleaseKind: Hashable, Sendable {
 struct Release: Identifiable, Hashable, Sendable {
     let id: String
     let title: String
-    let kind: ReleaseKind
+    /// nil when the listing doesn't say (artist carousels show only the year).
+    let kind: ReleaseKind?
     let artistName: String
-    let artistID: Artist.ID
-    let year: Int
-    let artwork: ArtworkTheme
+    let artistID: Artist.ID?
+    let year: Int?
+    let artwork: Artwork
     let trackIDs: [Track.ID]
 
     /// Apple Music suffixes non-album titles ("… - Single", "… - EP").
     var displayTitle: String {
         switch kind {
-        case .album: title
+        case .album, nil: title
         case .single: "\(title) - Single"
         case .ep: "\(title) - EP"
         }
@@ -72,14 +85,14 @@ struct Playlist: Identifiable, Hashable, Sendable {
     let kind: PlaylistKind
     let owner: String
     let description: String?
-    let artwork: ArtworkTheme
+    let artwork: Artwork
     let trackIDs: [Track.ID]
 }
 
 struct Artist: Identifiable, Hashable, Sendable {
     let id: String
     let name: String
-    let artwork: ArtworkTheme
+    let artwork: Artwork
     let description: String?
     /// Ordered as the artist page returns them; the view never invents sections.
     let sections: [ArtistSection]
@@ -169,7 +182,7 @@ enum Catalog {
         ("violet-hours", "Violet Hours", "soft-current"),
     ]
 
-    private static func t(_ id: String, _ title: String, _ artist: String, _ release: String, _ theme: ArtworkTheme, _ duration: Double, explicit: Bool = false) -> Track {
+    private static func t(_ id: String, _ title: String, _ artist: String, _ release: String, _ theme: Artwork, _ duration: Double, explicit: Bool = false) -> Track {
         let seed = releaseSeeds.first { $0.0 == release }!
         return Track(id: id, title: title, artist: artist, artistID: seed.2, album: seed.1, releaseID: release,
                      artwork: theme, duration: duration, isExplicit: explicit)
@@ -273,8 +286,9 @@ enum Catalog {
 
     static func tracks(of release: Release) -> [Track] { tracks(release.trackIDs) }
     static func tracks(of playlist: Playlist) -> [Track] { tracks(playlist.trackIDs) }
-    static func releases(by artistID: Artist.ID, excluding id: Release.ID? = nil) -> [Release] {
-        releases.filter { $0.artistID == artistID && $0.id != id }
+    static func releases(by artistID: Artist.ID?, excluding id: Release.ID? = nil) -> [Release] {
+        guard let artistID else { return [] }
+        return releases.filter { $0.artistID == artistID && $0.id != id }
     }
 
     // MARK: Home (YouTube Music shelf semantics)

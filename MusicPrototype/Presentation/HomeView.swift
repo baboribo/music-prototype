@@ -4,52 +4,129 @@ import SwiftUI
 // the shelves, their order and their tap semantics are YouTube Music's.
 struct HomeView: View {
     @Environment(MockPlayer.self) private var player
+    @Environment(\.musicCatalog) private var catalog
+    @State private var phase: Phase = .loading
+    @State private var attempt = 0
+
+    private enum Phase {
+        case loading
+        case loaded(HomeFeed)
+        case failed(String)
+    }
 
     var body: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 34) {
-                quickPicks
-                VStack(alignment: .leading, spacing: 8) {
-                    ShelfHeader(title: "잊고 있던 좋은 음악")
+        content
+            .accessibilityIdentifier("home.scroll")
+            .navigationTitle("Home")
+            // Apple's tab roots put the large title on the toolbar row (IMG_4032, am-library).
+            .toolbarTitleDisplayMode(.inlineLarge)
+            .task(id: attempt) { await load() }
+    }
+
+    @ViewBuilder private var content: some View {
+        switch phase {
+        case .loading:
+            ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+        case .failed(let message):
+            ContentUnavailableView {
+                Label("Home을 불러오지 못했습니다", systemImage: "exclamationmark.triangle")
+            } description: {
+                Text(message)
+            } actions: {
+                Button("다시 시도") { phase = .loading; attempt += 1 }
+                    .buttonStyle(.bordered)
+            }
+        case .loaded(let feed):
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 34) {
+                    ForEach(feed.sections) { section in
+                        self.section(section)
+                    }
+                    if feed.isSample {
+                        Text("샘플 음악 · 실제 오디오 없음")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, BrowseMetrics.margin)
+                    }
+                }
+                .padding(.top, 8)
+                .padding(.bottom, 24)
+            }
+        }
+    }
+
+    /// Runs on first appearance and on retry; returning to the tab keeps the loaded feed.
+    private func load() async {
+        guard case .loading = phase else { return }
+        do {
+            let feed = try await catalog.home()
+            phase = .loaded(feed)
+        } catch {
+            // Leaving the tab cancels the request; the next appearance retries.
+            guard !Task.isCancelled else { return }
+            phase = .failed(error.localizedDescription)
+        }
+    }
+
+    @ViewBuilder private func section(_ section: HomeSection) -> some View {
+        switch section.content {
+        case .quickPicks(let picks):
+            quickPicks(title: section.title, picks)
+        case .songs(let tracks, nil):
+            VStack(alignment: .leading, spacing: 8) {
+                ShelfHeader(title: section.title)
+                VStack(spacing: 0) {
+                    ForEach(tracks) { track in
+                        // YouTube Music starts a mix from a Home song.
+                        SongRow(track: track, leading: .artwork, subtitle: track.artist) { player.startMix(from: track) }
+                    }
+                }
+            }
+        case .songs(let tracks, let rowsPerPage?):
+            VStack(alignment: .leading, spacing: 8) {
+                ShelfHeader(title: section.title)
+                pagedSongs(tracks, rowsPerPage: rowsPerPage)
+            }
+        case .items(let items):
+            VStack(alignment: .leading, spacing: 12) {
+                ShelfHeader(title: section.title)
+                Shelf(items: items)
+            }
+        }
+    }
+
+    /// The service pages long song shelves into columns; each page is one
+    /// column of rows, with the next page peeking like the grid below.
+    private func pagedSongs(_ tracks: [Track], rowsPerPage: Int) -> some View {
+        let pages = stride(from: 0, to: tracks.count, by: rowsPerPage).map {
+            Array(tracks[$0..<min($0 + rowsPerPage, tracks.count)])
+        }
+        return ScrollView(.horizontal) {
+            LazyHStack(alignment: .top, spacing: 0) {
+                ForEach(pages.indices, id: \.self) { index in
                     VStack(spacing: 0) {
-                        ForEach(Catalog.forgottenFavorites) { track in
-                            // YouTube Music starts a mix from a Home song.
+                        ForEach(pages[index]) { track in
                             SongRow(track: track, leading: .artwork, subtitle: track.artist) { player.startMix(from: track) }
                         }
                     }
+                    .containerRelativeFrame(.horizontal) { width, _ in max(0, width - 29) }
                 }
-                shelf("다시 듣기", Catalog.listenAgain)
-                shelf("나만의 믹스", Catalog.mixesForYou)
-                Text("샘플 음악 · 실제 오디오 없음")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, BrowseMetrics.margin)
             }
-            .padding(.top, 8)
-            .padding(.bottom, 24)
+            .scrollTargetLayout()
         }
-        .accessibilityIdentifier("home.scroll")
-        .navigationTitle("Home")
-        // Apple's tab roots put the large title on the toolbar row (IMG_4032, am-library).
-        .toolbarTitleDisplayMode(.inlineLarge)
+        .scrollTargetBehavior(.viewAligned)
+        .scrollIndicators(.hidden)
     }
 
-    private func shelf(_ title: String, _ items: [BrowseItem]) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            ShelfHeader(title: title)
-            Shelf(items: items)
-        }
-    }
-
-    /// YouTube Music's 빠른 선곡 is a paged 3×3 grid of mixed items (songs,
+    /// YouTube Music's 빠른 선곡 is a paged grid of mixed items (songs,
     /// playlists, pinned items), row-major per page. Presented in Apple Music's
     /// grid grammar (square tile, one-line title below) with a shelf peek.
-    private var quickPicks: some View {
-        let pages = stride(from: 0, to: Catalog.quickPicks.count, by: 9).map {
-            Array(Catalog.quickPicks[$0..<min($0 + 9, Catalog.quickPicks.count)])
+    private func quickPicks(title: String, _ picks: [QuickPick]) -> some View {
+        let pages = stride(from: 0, to: picks.count, by: 9).map {
+            Array(picks[$0..<min($0 + 9, picks.count)])
         }
         return VStack(alignment: .leading, spacing: 12) {
-            ShelfHeader(title: "빠른 선곡")
+            ShelfHeader(title: title)
             ScrollView(.horizontal) {
                 LazyHStack(alignment: .top, spacing: 12) {
                     ForEach(pages.indices, id: \.self) { index in
@@ -89,7 +166,7 @@ private struct QuickPickTile: View {
         switch item {
         case .track(let track):
             Button { player.startMix(from: track) } label: {
-                tile(theme: track.artwork, title: track.title, pinned: false, playing: player.currentTrack?.id == track.id)
+                tile(artwork: track.artwork, title: track.title, pinned: false, playing: player.currentTrack?.id == track.id)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("\(track.title), \(track.artist)")
@@ -97,14 +174,14 @@ private struct QuickPickTile: View {
             .accessibilityIdentifier("track.\(track.id)")
         case .playlist(let playlist, let pinned):
             NavigationLink(value: Route.playlist(playlist.id)) {
-                tile(theme: playlist.artwork, title: playlist.title, pinned: pinned, playing: false)
+                tile(artwork: playlist.artwork, title: playlist.title, pinned: pinned, playing: false)
             }
             .buttonStyle(.plain)
             .accessibilityValue(pinned ? "고정됨" : "")
             .accessibilityIdentifier("quickpick.playlist.\(playlist.id)")
         case .release(let release, let pinned):
             NavigationLink(value: Route.release(release.id)) {
-                tile(theme: release.artwork, title: release.title, pinned: pinned, playing: false)
+                tile(artwork: release.artwork, title: release.title, pinned: pinned, playing: false)
             }
             .buttonStyle(.plain)
             .accessibilityValue(pinned ? "고정됨" : "")
@@ -112,9 +189,9 @@ private struct QuickPickTile: View {
         }
     }
 
-    private func tile(theme: ArtworkTheme, title: String, pinned: Bool, playing: Bool) -> some View {
+    private func tile(artwork: Artwork, title: String, pinned: Bool, playing: Bool) -> some View {
         VStack(spacing: 6) {
-            ArtworkView(theme: theme, cornerRadius: 6)
+            ArtworkView(artwork: artwork, cornerRadius: 6)
                 .overlay(alignment: .topTrailing) {
                     if pinned {
                         Image(systemName: "pin.fill").font(.caption2).foregroundStyle(.white).padding(6).accessibilityHidden(true)

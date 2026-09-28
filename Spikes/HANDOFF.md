@@ -6,7 +6,7 @@
 ## 1. 저장소 상태
 
 - `main` = `9e1965a` (mock UI checkpoint). `spike/innertube-playback` = main + (1) Xcode Personal Team signing commit + (2) 이 문서를 포함한 spike checkpoint commit. `outputs/`, `references/`는 기존 정책대로 미추적.
-- 앱(`MusicPrototype/`) 소스는 이번 spike에서 수정하지 않았다. 앱 build 정상.
+- 앱(`MusicPrototype/`) 소스는 spike checkpoint까지 수정하지 않았다. 그 다음 commit("A1–A5 InnerTube data integration checkpoint")이 8절 A축 A1–A5와 `AGENTS.md` 규칙 갱신을 담는다.
 - `MusicPrototype.xcodeproj` / scheme diff는 사용자가 Xcode에서 Personal Team(`DEVELOPMENT_TEAM`, automatic)을 지정하며 Xcode가 파일을 재서식한 결과다. spike 코드가 아니다.
 - spike 코드: `Spikes/InnerTubeProbe`(SwiftPM, macOS CLI + library), `Spikes/WebPlayerSpike`(별도 iOS app, bundle `dev.ema.WebPlayerSpike`, MusicPrototype와 target·bundle·profile 분리).
 
@@ -98,19 +98,52 @@ playlistPanelVideoWrapperRenderer
 - **시스템 볼륨**: 하드웨어 버튼·제어센터 모두 실제 음량 변경. 단 앱의 `AVAudioSession.outputVolume` KVO는 초기값 외 이벤트 0 → 동기화 slider는 `MPVolumeView` 후보 [미검증].
 - AirPods/Bluetooth route, interruption(전화 등) [미검증].
 
-## 8. Unresolved blocker와 다음 결정
+## 8. 결정과 진행 (2026-09-28 갱신)
 
-현재 사실: Song↔Video를 포함한 "완전한 음악 앱" 재생 경로는 모두 우회가 필요하다.
-- Native: signature/n (+ 경우에 따라 POT) — 곡·영상 양쪽 stream.
-- Web-backed: 전환은 실제 client로 동작하지만 background 재생은 페이지의 hidden handler가 막음 → 해결하려면 visibility 위장/handler 무력화 = 우회.
+결정: web foreground-only, 공식 YTM 앱 hand-off는 **채택하지 않음**. 두 축으로 진행, 서로 blocking하지 않음.
 
-사용자 결정 필요(범위·약관 판단):
-1. 우회 없이: web-backed foreground 전용, 또는 앱은 browse/library UI + 재생은 공식 YTM 앱으로 hand-off.
-2. 우회 경로 채택 여부와 어느 것(native sig/n/POT vs web visibility).
-3. 결정 전 가능한 작업: cookie session 기반 InnerTube data layer를 앱 domain에 연결(4절 수정점), Queue model에 counterpart/segmentMap 반영.
-4. 결정: native playback 연구를 계속하며 data integration은 병행. Web foreground-only / official-app handoff는 제품 경로로 채택하지 않음.
+### A. 본 앱 data layer (단계: Home → Search → Release → Artist → Playlist → Library)
+- 구조: `MusicPrototype/Domain/MusicCatalog.swift`(protocol + `MockMusicCatalog`, `HomeFeed`) ← `MusicPrototype/Service/InnerTube/`(JSON, `SessionCredential`, `InnerTubeClient`, `ItemParsing`, `LiveMusicCatalog`). View는 `\.musicCatalog`만 안다.
+- Live 전환: 환경변수 `YTM_SESSION_FILE`(저장소 밖 경로만, 안이면 거부) 있을 때만. 없으면 fixture. Simulator: `SIMCTL_CHILD_YTM_SESSION_FILE=… xcrun simctl launch …`. 실기기용 세션 획득은 미정.
+- Domain 변경: `Artwork`(fixture theme | remote URL), `Track.duration`/`Release.kind`/`year`/`artistID` optional.
+- **A1 Home [확인, Simulator]**: live Home = continuation 포함 4–5 요청, 13–15 shelf, ~2.4 s. 서버 제목·순서 그대로, `빠른 선곡`만 H1에 따라 맨 위로. 빠른 선곡은 web 응답에서 **마지막 page**에 있고 식별자는 지역화 제목뿐(`빠른 선곡`/`Quick picks`). 목록형 shelf는 서버 `numItemsPerColumn`(4)로 가로 paging. 오류 상태(세션 파일 거부, `logged_in=0` 만료) + 다시 시도 확인. Mock 모드 Home은 이전과 동일.
+- A1 남은 차이: podcast/episode 항목 미표시, Home 곡 duration 없음(0:00), player backdrop는 remote art일 때 고정색, Release/Artist/Playlist 상세는 live id면 "아직 연결되지 않은 페이지".
+- **세션 만료 전제 [확인]**: 2026-09-28 원본 브라우저에서 로그아웃하자 저장된 cookie 파일이 무효화됨(재로그인 후 새 파일로 교체, `logged_in=1` 재확인). 설계 반영:
+  - credential은 `SessionCredentialStore`(actor)를 통해서만 사용. 서버가 거부(`logged_in=0`, HTTP 401/403)하면 그 파일 버전(mtime)을 rejected로 기록하고 **같은 버전으로는 더 요청하지 않음**. 같은 경로의 파일이 교체되면 다음 요청에서 다시 읽음(앱 재시작 불필요). 익명 요청으로 몰래 fallback하지 않음.
+  - UI에는 `CatalogError.signedOut`("세션 만료/로그아웃, 갱신 후 다시 시도")만 보임.
+  - 실기기 production에서는 파일 대신 앱 내 로그인에서 얻은 세션이 같은 store 자리에 들어가야 함 [미구현, 방식 미정].
+- **Replay 모드 (debug build)**: `YTM_REPLAY_DIR`(저장소 밖)의 `manifest.json`이 요청 키(`browse:<id>`, `browse:continuation:<token>`, `search:<query>:<params>`)를 redacted 응답 파일에 매핑. 계정 요청 없이 parser·UI 검증용. 녹화 없는 요청은 `notRecorded` 오류. 녹화 응답은 계정 데이터(청취 기록 등)를 담으므로 commit하지 않음.
+- **A2 Search [확인, Simulator, 새 세션]**: live "iu" 검색 — 상단 아티스트 카드, 노래/싱글/EP/앨범/재생목록/아티스트 행, 노래·재생목록 필터가 서버 필터 응답(`musicShelfRenderer`)으로 동작. Mock 검색 결과 이전과 동일. 만료 처리 runtime 확인: 가짜 cookie → 1회 요청 후 rejected, 다시 시도 2회는 **요청 없음**, 같은 경로 파일 교체 후 다시 시도는 새 요청 1회. `MusicCatalog.search(_:filter:)`. 필터는 서버 chip params(ytmusicapi와 같은 상수), UI의 "재생목록"은 서버 "추천 재생목록"에 매핑(커뮤니티 재생목록 chip 없음). 결과: 상단 카드(`musicCardShelfRenderer`) + 결과별 `itemSectionRenderer` 행, 중복 제거. 입력은 300 ms debounce, 입력이 바뀌면 이전 요청 취소. 보관함 scope는 Library 단계까지 로컬 fixture 필터 유지.
+- **A3 Release [확인, Simulator, live]**: `MusicCatalog.release(_:)` → `ReleaseDetail`(release, tracks, server shelves). 공용 `CatalogPage` 로더(로딩/오류/다시 시도). 실제 응답 기준 반영: 헤더 `subtitle`("앨범 • 2017년") → kind·year, 아티스트는 `straplineTextOne`; 트랙 행은 아티스트 열이 비어 있어 앨범 아티스트로 채움, 행 thumbnail 없음 → 앨범 art; 하단 shelf는 서버 제목(`맞춤 발표곡`, 다른 아티스트 포함)으로 표시, 싱글은 shelf 없음. 앨범(Palette)·EP(Love poem, shelf에서 중첩 이동)·싱글(이 별로부터) 확인, footer "10곡, 39분"이 서버 `secondSubtitle`과 일치. 이번 응답들에 unplayable 트랙은 없었음 → 표현 미반영. 검색 결과로 돌아올 때 재요청하던 문제 수정(같은 query·filter면 재사용). Mock release 페이지 동일, replay의 미녹화 앨범에서 오류 상태 확인.
+- **A4 Artist [확인, Simulator, live]**: `MusicCatalog.artist(_:)` → `ArtistDetail`(artist, 서버 순서 섹션 `.songs`/`.items`, `radioPlaylistID` RDEM…, `shufflePlaylistID` RDAO…). 실제 응답 기준 반영: header `musicImmersiveHeaderRenderer`, 믹스/셔플은 `watchEndpoint.playlistId`(예전 `watchPlaylistEndpoint` 아님); `description`은 아티스트마다 있거나 없음(아이유 없음 → 정보 버튼 숨김, AKMU 있음 → 시트 표시); hero 이미지는 와이드 배너(최대 2880×1200)라 리사이즈하지 않음; 인기곡 행의 앨범은 **4번째 열** → 앨범 열 탐색을 모든 열로 일반화; `앨범` shelf 카드는 연도만 있어 페이지 아티스트로 귀속. 섹션: 인기곡, 앨범, 싱글 및 EP, 동영상, 라이브 공연 영상, 추천 콘텐츠, <아티스트>의 재생목록, 팬이 좋아할 만한 다른 아티스트(모두 서버 제목). 확인: 검색→아티스트, 아티스트→유사 아티스트(AKMU), 인기곡 메뉴 "앨범으로 이동"→Release, 재생 버튼(mock radio), Mock Glass Orchard 동일, replay 미녹화 오류 상태. 섹션 "더보기" endpoint(전체 곡 VLOLAK…, 디스코그래피 MPAD…)는 기존 UI에 chevron이 없어 미연결.
+- **A5 Playlist [확인, Simulator, live]**: `MusicCatalog.playlist(_:)` → `PlaylistDetail`(playlist, 첫 페이지 tracks, 서버 `summary`, `next`) + `playlistPage(_:)`(continuation). 실제 응답 기준 반영:
+  - 행은 `musicPlaylistShelfRenderer`에 **100개씩**, 끝에 `continuationItemRenderer.continuationEndpoint.continuationCommand.token`; 다음 페이지는 `browse {continuation}` → `onResponseReceivedActions[].appendContinuationItemsAction.continuationItems`. 좋아요 1,110곡 끝까지 연결 확인(11회).
+  - 종류는 header subtitle 첫 부분(`자동 재생목록`/`믹스`/`재생목록`) 우선; ID 규칙 수정: `RDCLAK…`은 편집 재생목록(믹스 아님).
+  - 소유자 이름은 `facepile.avatarStackViewModel.text.content`에만 있음(편집·일부 믹스 = "YouTube Music"; 사용자 재생목록·좋아요는 없음) → 빈 경우 header 부제 생략, footer는 "재생목록 · 나"로 가정하지 않고 "재생목록".
+  - 사용자 재생목록 행은 재생시간이 flex 열에 있음 → duration 탐색 확장(`m:ss` 형식만).
+  - **unplayable**: `musicItemRendererDisplayPolicy = GREY_OUT`(사유 텍스트 없음) → `Track.isPlayable`; SongRow 흐리게 + 재생 비활성, 셔플/재생 목록에서 제외.
+  - footer 곡 수/길이는 서버 `secondSubtitle`("1,110곡 • 6시간 이상") 사용(페이지 일부만 로드되므로).
+  - 확인: 편집(Presenting 아이유, 소유자 표시·저장 버튼), 좋아요(자동, 다운로드 자리), 사용자(Made in Japan, 430곡, 62번째 greyed 행 흐리게 표시, 스크롤 끝에서 continuation 1회), 믹스(보관 콘텐츠 믹스), Mock 좋아요 재생목록 동일.
+  - 검증 중 발견·수정: (1) 행 컨테이너가 `VStack`이라 마지막 행 onAppear가 즉시 연쇄 → 전체 페이지 자동 로드 → `LazyVStack`으로 수정 후 1회만. (2) Home 탭 복귀 시 Home 5요청 재발생 → 로드된 feed 유지(다시 시도만 재로드), 탭 왕복 후 추가 요청 0 확인.
+  - 미확인: greyed 행 탭 시 재생 안 됨(탭이 스크롤로 빗나가 다른 행이 재생됨; `.disabled` 코드만), live footer의 서버 summary 표시 화면, 재생목록 오류 상태(공용 `CatalogPage`, Release/Artist에서 확인), 사용자 재생목록의 소유권(내 것/남의 것) 판별 방법 — header `buttons` 등 조사 필요.
 
-그 외 미검증: authenticated IOS 계열(cookie 비적용·OAuth 거부로 불가), `visionos`/ANDROID_MUSIC 등 추가 client(범위 밖으로 보류), 실제 기기 AVPlayer(재생 가능한 URL 없음).
+#### 남은 작업 (2026-09-28, 5시간 사용량 약 80%에서 중단)
+1. A6 Library(FEmusic_liked_playlists, 좋아요/기록/보관함 카테고리, 보관함 검색 scope) — 미착수.
+2. Queue domain: `primary + optional counterpart + segmentMap`(`/next`) 반영 — 미착수. 현재 Mix/라디오는 MockPlayer 로컬 순서.
+3. A5 미확인 항목(위) 재검증.
+4. B2 실험(sig/n만 적용 시 200 여부) — 사용자 승인 대기.
+5. (완료) `AGENTS.md` 규칙 갱신: data integration 허용, playback은 spike 분리, 보호 우회는 승인 전 금지.
+6. (완료) A1–A5 checkpoint commit.
+
+### B. Native playback spike (본 앱과 분리)
+조사 [가설 — 외부 자료, 이 환경 미검증]:
+- yt-dlp PO Token Guide(2026-07-12 편집): `web_music` GVS에 POT 필요, 단 **"GVS PO Token is not required for YouTube Premium subscribers"**. `web_safari` HLS는 **GVS POT 불필요**. → 6절의 HLS segment 403은 POT보다 **n 미변환**이 원인일 가능성이 높아짐(Premium cookie 세션이므로).
+- yt-dlp는 sig/n을 regex 추출(JSInterp)에서 **EJS(외부 JS runtime으로 player JS + 유지보수 solver script 실행)**로 전환. player 변경에 solver script를 yt-dlp와 함께 갱신하는 모델.
+- YouTubeKit(Swift, 2026-08-18 최신 "fix/youtube-august-26"): player JS에서 함수를 regex로 잘라 **JavaScriptCore**로 n/sig 실행, 깨지면 remote extractor fallback. YouTube 변경마다 수정 릴리스 필요.
+- LuanRT/googlevideo: SABR/UMP 프로토콜 JS 구현(protobuf, UMP reader, SABR stream). SABR 경로를 택하면 참고 대상.
+- 필수성 분리 실험(제안, 미실행): Premium cookie + WEB_REMIX `signatureCipher` 오디오(itag 141/774) 또는 WEB_SAFARI HLS에 sig/n만 적용 → 200이면 POT/SABR 불필요 확정. 이 실험 자체가 player JS challenge 해결 = 합의된 "우회 구현 전 보고" 경계라 사용자 승인 후 진행.
+
+그 외 미검증: authenticated IOS 계열(cookie 비적용·OAuth 거부), 추가 client, 실제 기기 AVPlayer(재생 가능한 URL 없음).
 
 ## 9. 민감정보 / 정리
 

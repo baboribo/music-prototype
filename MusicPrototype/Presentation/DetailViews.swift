@@ -1,18 +1,60 @@
 import SwiftUI
 
+/// Loads a catalog page by id with loading, failure and retry states.
+struct CatalogPage<Value: Sendable, Content: View>: View {
+    let load: () async throws -> Value
+    @ViewBuilder let content: (Value) -> Content
+    @State private var phase: Phase = .loading
+    @State private var attempt = 0
+
+    private enum Phase {
+        case loading
+        case loaded(Value)
+        case failed(String)
+    }
+
+    var body: some View {
+        Group {
+            switch phase {
+            case .loading:
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .loaded(let value):
+                content(value)
+            case .failed(let message):
+                ContentUnavailableView {
+                    Label("페이지를 불러오지 못했습니다", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(message)
+                } actions: {
+                    Button("다시 시도") { phase = .loading; attempt += 1 }.buttonStyle(.bordered)
+                }
+            }
+        }
+        .task(id: attempt) {
+            guard case .loading = phase else { return }
+            do {
+                phase = .loaded(try await load())
+            } catch {
+                guard !Task.isCancelled else { return }
+                phase = .failed(error.localizedDescription)
+            }
+        }
+    }
+}
+
 /// Album, Single and EP share Apple Music's release page; only the kind label differs.
 struct ReleaseDetailView: View {
     @Environment(MockPlayer.self) private var player
-    let release: Release
+    let detail: ReleaseDetail
 
-    private var tracks: [Track] { Catalog.tracks(of: release) }
-    private var moreReleases: [BrowseItem] { Catalog.releases(by: release.artistID, excluding: release.id).map(BrowseItem.release) }
+    private var release: Release { detail.release }
+    private var tracks: [Track] { detail.tracks }
 
     var body: some View {
         ScrollView {
             VStack(spacing: 0) {
                 DetailHeader(artwork: release.artwork, title: release.displayTitle, subtitle: release.artistName,
-                             subtitleRoute: .artist(release.artistID), meta: "\(release.kind.label) · \(String(release.year))년")
+                             subtitleRoute: release.artistID.map(Route.artist), meta: release.meta)
                 PlaybackActions(shuffle: { play(shuffled: true) }, play: { play(shuffled: false) }) {
                     LibrarySaveButton(id: release.id)
                 }
@@ -31,11 +73,11 @@ struct ReleaseDetailView: View {
                 }
                 .padding(.bottom, 24)
 
-                DetailFooter(lines: ["\(String(release.year))년", durationSummary(tracks)]) {
-                    if !moreReleases.isEmpty {
+                DetailFooter(lines: [release.year.map { "\(String($0))년" }, durationSummary(tracks)].compactMap(\.self)) {
+                    ForEach(detail.shelves) { shelf in
                         VStack(alignment: .leading, spacing: 12) {
-                            ShelfHeader(title: "\(release.artistName)의 다른 음악", route: .artist(release.artistID))
-                            Shelf(items: moreReleases)
+                            ShelfHeader(title: shelf.title, route: shelf.route)
+                            Shelf(items: shelf.items)
                         }
                     }
                 }
@@ -49,8 +91,10 @@ struct ReleaseDetailView: View {
             ToolbarItem(placement: .principal) { Color.clear.frame(width: 1, height: 1) }
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
-                    NavigationLink(value: Route.artist(release.artistID)) {
-                        Label("아티스트로 이동", systemImage: "music.microphone")
+                    if let artistID = release.artistID {
+                        NavigationLink(value: Route.artist(artistID)) {
+                            Label("아티스트로 이동", systemImage: "music.microphone")
+                        }
                     }
                 } label: { Image(systemName: "ellipsis") }
                 .tint(.primary)
@@ -67,17 +111,38 @@ struct ReleaseDetailView: View {
     }
 }
 
+extension Release {
+    /// "앨범 · 2017년"; either part may be unknown for service listings.
+    var meta: String? {
+        let parts = [kind?.label, year.map { "\(String($0))년" }].compactMap(\.self)
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+}
+
 /// Same header grammar as releases; rows carry artwork because items differ in origin.
 struct PlaylistDetailView: View {
     @Environment(MockPlayer.self) private var player
-    let playlist: Playlist
+    @Environment(\.musicCatalog) private var catalog
+    let detail: PlaylistDetail
+    /// Rows fetched after the first page, as the list scrolls to its end.
+    @State private var more: [Track] = []
+    @State private var next: PlaylistDetail.Continuation?
+    @State private var loadingMore = false
+    @State private var loadFailed = false
 
-    private var tracks: [Track] { Catalog.tracks(of: playlist) }
+    init(detail: PlaylistDetail) {
+        self.detail = detail
+        _next = State(initialValue: detail.next)
+    }
+
+    private var playlist: Playlist { detail.playlist }
+    private var tracks: [Track] { detail.tracks + more }
 
     /// YouTube Music's page line for each source; shown in the footer, not the header.
     private var kindLine: String {
         switch playlist.kind {
-        case .user: "재생목록 · 나"
+        // The page names no owner for user playlists; don't assume it's the listener's.
+        case .user: playlist.owner.isEmpty ? "재생목록" : "재생목록 · \(playlist.owner)"
         case .editorial: "재생목록 · \(playlist.owner)"
         case .mix: "믹스 · 매일 업데이트"
         case .radio: "라디오"
@@ -101,17 +166,29 @@ struct PlaylistDetailView: View {
                 .padding(.top, 18)
                 .padding(.bottom, 23)
 
-                VStack(spacing: 0) {
+                // Lazy so the last row appears (and fetches the next page) only when scrolled to.
+                LazyVStack(spacing: 0) {
                     Divider().padding(.horizontal, BrowseMetrics.margin)
-                    ForEach(tracks) { track in
+                    ForEach(Array(tracks.enumerated()), id: \.offset) { index, track in
                         SongRow(track: track, leading: .artwork, subtitle: track.artist) {
                             player.play(track, in: tracks, source: playlist.title)
                         }
+                        .onAppear { if index == tracks.count - 1 { Task { await loadMore() } } }
+                    }
+                    if next != nil {
+                        Group {
+                            if loadFailed {
+                                Button("나머지 곡 다시 불러오기") { Task { await loadMore() } }.buttonStyle(.bordered)
+                            } else {
+                                ProgressView()
+                            }
+                        }
+                        .padding(.vertical, 16)
                     }
                 }
                 .padding(.bottom, 24)
 
-                DetailFooter(lines: [playlist.description, kindLine, durationSummary(tracks)].compactMap { $0 }) { EmptyView() }
+                DetailFooter(lines: [playlist.description, kindLine, detail.summary ?? durationSummary(tracks)].compactMap { $0 }) { EmptyView() }
             }
         }
         .scrollEdgeEffectStyle(.soft, for: .top)
@@ -123,8 +200,22 @@ struct PlaylistDetailView: View {
         .accessibilityIdentifier("playlist.\(playlist.id)")
     }
 
+    private func loadMore() async {
+        guard let token = next, !loadingMore else { return }
+        loadingMore = true
+        defer { loadingMore = false }
+        do {
+            let page = try await catalog.playlistPage(token)
+            more += page.tracks
+            next = page.next
+            loadFailed = false
+        } catch {
+            loadFailed = true
+        }
+    }
+
     private func play(shuffled: Bool) {
-        let list = shuffled ? tracks.shuffled() : tracks
+        let list = (shuffled ? tracks.shuffled() : tracks).filter(\.isPlayable)
         guard let first = list.first else { return }
         player.play(first, in: list, source: playlist.title)
     }
@@ -136,14 +227,16 @@ struct ArtistDetailView: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var subscribed = false
     @State private var showingAbout = false
-    let artist: Artist
+    let detail: ArtistDetail
+
+    private var artist: Artist { detail.artist }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 hero
                 VStack(alignment: .leading, spacing: 34) {
-                    ForEach(Array(artist.sections.enumerated()), id: \.offset) { _, section in
+                    ForEach(detail.sections) { section in
                         sectionView(section)
                     }
                 }
@@ -176,7 +269,7 @@ struct ArtistDetailView: View {
         ZStack(alignment: .bottom) {
             GeometryReader { geometry in
                 // Fill the whole hero (image runs under the name), cropped from the square art.
-                ArtworkView(theme: artist.artwork, cornerRadius: 0)
+                ArtworkView(artwork: artist.artwork, cornerRadius: 0)
                     .frame(width: geometry.size.height, height: geometry.size.height)
                     .frame(width: geometry.size.width, height: geometry.size.height)
                     .clipped()
@@ -200,7 +293,7 @@ struct ArtistDetailView: View {
                     .disabled(artist.description == nil)
                     .accessibilityLabel("아티스트 정보")
 
-                    Button { player.startRadio(for: artist) } label: {
+                    Button { player.startRadio(for: artist, songs: detail.songs) } label: {
                         Image(systemName: "play.fill").font(.title.weight(.semibold)).frame(width: 72, height: 72)
                     }
                     .buttonStyle(.plain)
@@ -226,10 +319,9 @@ struct ArtistDetailView: View {
     }
 
     @ViewBuilder
-    private func sectionView(_ section: ArtistSection) -> some View {
+    private func sectionView(_ section: ArtistDetail.Section) -> some View {
         switch section.content {
-        case .songs(let ids):
-            let songs = Catalog.tracks(ids)
+        case .songs(let songs):
             VStack(alignment: .leading, spacing: 8) {
                 ShelfHeader(title: section.title)
                 VStack(spacing: 0) {
@@ -240,12 +332,8 @@ struct ArtistDetailView: View {
                     }
                 }
             }
-        case .releases(let ids):
-            shelf(section.title, ids.compactMap(Catalog.release).map(BrowseItem.release))
-        case .playlists(let ids):
-            shelf(section.title, ids.compactMap(Catalog.playlist).map(BrowseItem.playlist))
-        case .artists(let ids):
-            shelf(section.title, ids.compactMap(Catalog.artist).map(BrowseItem.artist))
+        case .items(let items):
+            shelf(section.title, items)
         }
     }
 
@@ -259,7 +347,7 @@ struct ArtistDetailView: View {
     /// Apple: "I'm Nobody - Single · 2024년".
     private func releaseLine(_ track: Track) -> String {
         guard let release = track.releaseID.flatMap(Catalog.release) else { return track.album }
-        return "\(release.displayTitle) · \(String(release.year))년"
+        return [release.displayTitle, release.year.map { "\(String($0))년" }].compactMap(\.self).joined(separator: " · ")
     }
 }
 

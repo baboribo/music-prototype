@@ -1,7 +1,11 @@
 # Project
 
 개인용 네이티브 iOS YouTube Music 클라이언트. SwiftUI로 개발한다.
-현재 단계는 승인된 mock SwiftUI prototype 검증이다. T1(Home/Library + native Search), H1(Quick Picks 우선), P1 Mini/P3 Full Player를 구현한다. YouTube Music networking, authentication, streaming은 아직 구현하지 않는다.
+승인된 SwiftUI prototype(T1 Home/Library + native Search, H1 Quick Picks 우선, P1 Mini/P3 Full Player)에 실제 YouTube Music 데이터를 단계적으로 연결하는 중이다. 진행 상황과 검증 근거는 `Spikes/HANDOFF.md`를 따른다.
+
+- InnerTube networking, 사용자 본인 browser session 기반 auth, browse/search/library data integration은 허용된 작업이다. credential·session 파일과 녹화 응답은 저장소 밖에 두고 commit하지 않는다. UI/domain은 인증 구현을 직접 알지 않는다.
+- Playback/streaming은 production 앱에 바로 결합하지 않는다. 별도 spike(`Spikes/`)에서 연구하고, 검증된 뒤에만 앱 연결을 제안한다.
+- signature/n, PO Token, SABR, 페이지 동작 무력화 등 보호·anti-abuse 계층을 우회하는 구현은 검증과 사용자 승인 없이 진행하지 않는다. 먼저 필요한 기술 요소, 대안, 유지보수 비용을 보고한다.
 
 ## Platform and sources
 

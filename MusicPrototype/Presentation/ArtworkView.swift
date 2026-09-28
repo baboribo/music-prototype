@@ -1,11 +1,9 @@
 import SwiftUI
 
-// Local fixture artwork, not a downloaded album cover or a glass surface.
+// Fixture gradient or the service's image; never a glass surface.
 struct ArtworkView: View {
-    let theme: ArtworkTheme
+    let artwork: Artwork
     var cornerRadius: CGFloat = 8
-
-    private var colors: [Color] { Self.colors(for: theme) }
 
     static func colors(for theme: ArtworkTheme) -> [Color] {
         switch theme {
@@ -19,19 +17,41 @@ struct ArtworkView: View {
     }
 
     var body: some View {
-        GeometryReader { geometry in
-            ZStack {
-                LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing)
-                Circle()
-                    .stroke(.white.opacity(0.22), lineWidth: geometry.size.width * 0.09)
-                    .padding(geometry.size.width * 0.17)
-                Image(systemName: "waveform")
-                    .font(.system(size: geometry.size.width * 0.22, weight: .light))
-                    .foregroundStyle(.white.opacity(0.9))
+        // Square slot; wider images (video thumbnails) are center-cropped into it.
+        Color.clear
+            .aspectRatio(1, contentMode: .fit)
+            .overlay {
+                switch artwork {
+                case .theme(let theme): Placeholder(colors: Self.colors(for: theme))
+                case .remote(let url):
+                    AsyncImage(url: url) { phase in
+                        if let image = phase.image {
+                            image.resizable().scaledToFill()
+                        } else {
+                            Color(.secondarySystemFill)
+                        }
+                    }
+                }
+            }
+            .clipShape(.rect(cornerRadius: cornerRadius))
+            .accessibilityHidden(true)
+    }
+
+    private struct Placeholder: View {
+        let colors: [Color]
+
+        var body: some View {
+            GeometryReader { geometry in
+                ZStack {
+                    LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing)
+                    Circle()
+                        .stroke(.white.opacity(0.22), lineWidth: geometry.size.width * 0.09)
+                        .padding(geometry.size.width * 0.17)
+                    Image(systemName: "waveform")
+                        .font(.system(size: geometry.size.width * 0.22, weight: .light))
+                        .foregroundStyle(.white.opacity(0.9))
+                }
             }
         }
-        .aspectRatio(1, contentMode: .fit)
-        .clipShape(.rect(cornerRadius: cornerRadius))
-        .accessibilityHidden(true)
     }
 }

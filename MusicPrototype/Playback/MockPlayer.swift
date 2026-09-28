@@ -101,10 +101,7 @@ final class MockPlayer {
     }
 
     /// Artist page play: YouTube Music starts the artist's radio rather than an album.
-    func startRadio(for artist: Artist) {
-        let songs = artist.sections.compactMap { section -> [Track]? in
-            if case .songs(let ids) = section.content { Catalog.tracks(ids) } else { nil }
-        }.flatMap { $0 }
+    func startRadio(for artist: Artist, songs: [Track]) {
         guard let first = songs.first else { return }
         play(first, in: songs, source: "\(artist.name) 라디오")
     }

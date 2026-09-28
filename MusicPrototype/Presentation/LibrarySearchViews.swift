@@ -53,7 +53,7 @@ struct LibraryView: View {
 
     private func pinnedTile(_ item: BrowseItem) -> some View {
         VStack(spacing: 7) {
-            ArtworkView(theme: item.artwork, cornerRadius: item.isArtist ? 999 : 8)
+            ArtworkView(artwork: item.artwork, cornerRadius: item.isArtist ? 999 : 8)
                 .aspectRatio(1, contentMode: .fit)
             Text(item.title).font(.caption).lineLimit(1)
         }
@@ -88,7 +88,7 @@ struct GridTile: View {
 
     var body: some View {
         VStack(alignment: item.isArtist ? .center : .leading, spacing: 0) {
-            ArtworkView(theme: item.artwork, cornerRadius: item.isArtist ? 999 : 6)
+            ArtworkView(artwork: item.artwork, cornerRadius: item.isArtist ? 999 : 6)
                 .aspectRatio(1, contentMode: .fit)
                 .padding(.bottom, 7)
             Text(item.title).font(.subheadline).lineLimit(1)
@@ -163,9 +163,9 @@ struct LibraryCategoryView: View {
         }
     }
 
-    private func listRow(artwork: ArtworkTheme, circle: Bool, size: CGFloat, title: String, subtitle: String?) -> some View {
+    private func listRow(artwork: Artwork, circle: Bool, size: CGFloat, title: String, subtitle: String?) -> some View {
         HStack(spacing: 14) {
-            ArtworkView(theme: artwork, cornerRadius: circle ? size / 2 : 6).frame(width: size, height: size)
+            ArtworkView(artwork: artwork, cornerRadius: circle ? size / 2 : 6).frame(width: size, height: size)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(.body).lineLimit(2)
                 if let subtitle { Text(subtitle).font(.subheadline).foregroundStyle(.secondary).lineLimit(1) }
@@ -202,21 +202,6 @@ struct LibraryCategoryView: View {
 
 enum SearchScope: Hashable { case catalog, library }
 
-/// Result-type chips shared by Apple Music and YouTube Music search.
-enum SearchFilter: CaseIterable, Hashable {
-    case top, songs, albums, artists, playlists
-
-    var title: String {
-        switch self {
-        case .top: "인기 검색 결과"
-        case .songs: "노래"
-        case .albums: "앨범"
-        case .artists: "아티스트"
-        case .playlists: "재생목록"
-        }
-    }
-}
-
 /// Session-only recent searches (both apps show them on the empty Search page).
 @MainActor
 @Observable
@@ -236,27 +221,44 @@ struct SearchView: View {
     @Environment(MockPlayer.self) private var player
     @Environment(MockLibrary.self) private var library
     @Environment(SearchHistory.self) private var history
+    @Environment(\.musicCatalog) private var catalog
     let query: String
     let scope: SearchScope
     @State private var filter: SearchFilter = .top
+    @State private var remote: RemotePhase = .idle
+    @State private var attempt = 0
+    /// What `remote` holds, so returning from a pushed page doesn't search again.
+    @State private var loadedKey: RequestKey?
+
+    /// Catalog results for one query/filter pair.
+    private enum RemotePhase {
+        case idle
+        case loading
+        case loaded(SearchResults)
+        case failed(String)
+    }
+
+    private struct RequestKey: Equatable {
+        let query: String
+        let filter: SearchFilter
+        let scope: SearchScope
+        let attempt: Int
+    }
 
     private var normalizedQuery: String { query.trimmingCharacters(in: .whitespacesAndNewlines) }
 
-    private var results: [BrowseItem] {
+    /// Library scope still filters the local library (the Library step replaces it).
+    private var libraryResults: [BrowseItem] {
         let q = normalizedQuery
         guard !q.isEmpty else { return [] }
-        let inLibrary: (String) -> Bool = { scope == .catalog || library.contains($0) }
-        let artists = Catalog.artists.filter { $0.name.localizedStandardContains(q) }.map(BrowseItem.artist)
-        let releases = Catalog.releases.filter { inLibrary($0.id) && "\($0.title) \($0.artistName)".localizedStandardContains(q) }.map(BrowseItem.release)
-        let playlists = Catalog.playlists.filter { inLibrary($0.id) && "\($0.title) \($0.owner)".localizedStandardContains(q) }.map(BrowseItem.playlist)
-        let songs = Catalog.tracks.filter {
-            (scope == .catalog || Catalog.librarySongs.contains($0)) && "\($0.title) \($0.artist) \($0.album)".localizedStandardContains(q)
-        }.map(BrowseItem.track)
+        let releases = Catalog.releases.filter { library.contains($0.id) && "\($0.title) \($0.artistName)".localizedStandardContains(q) }.map(BrowseItem.release)
+        let playlists = Catalog.playlists.filter { library.contains($0.id) && "\($0.title) \($0.owner)".localizedStandardContains(q) }.map(BrowseItem.playlist)
+        let songs = Catalog.librarySongs.filter { "\($0.title) \($0.artist) \($0.album)".localizedStandardContains(q) }.map(BrowseItem.track)
         switch filter {
-        case .top: return (scope == .catalog ? artists : []) + songs + releases + playlists
+        case .top: return songs + releases + playlists
         case .songs: return songs
         case .albums: return releases
-        case .artists: return scope == .catalog ? artists : []
+        case .artists: return []
         case .playlists: return playlists
         }
     }
@@ -273,13 +275,7 @@ struct SearchView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 8) {
                         chips
-                        if results.isEmpty {
-                            ContentUnavailableView.search(text: normalizedQuery).padding(.top, 60)
-                        } else {
-                            LazyVStack(spacing: 0) {
-                                ForEach(results) { resultRow($0) }
-                            }
-                        }
+                        resultsContent
                     }
                 }
                 .scrollDismissesKeyboard(.interactively)
@@ -287,6 +283,57 @@ struct SearchView: View {
         }
         .navigationTitle("Search")
         .toolbarTitleDisplayMode(.inlineLarge)
+        .task(id: requestKey) { await search() }
+    }
+
+    @ViewBuilder private var resultsContent: some View {
+        let items: [BrowseItem]? = switch (scope, remote) {
+        case (.library, _): libraryResults
+        case (.catalog, .loaded(let results)): (results.top.map { [$0] } ?? []) + results.items
+        default: nil
+        }
+        if let items {
+            if items.isEmpty {
+                ContentUnavailableView.search(text: normalizedQuery).padding(.top, 60)
+            } else {
+                LazyVStack(spacing: 0) {
+                    ForEach(items) { resultRow($0) }
+                }
+            }
+        } else if case .failed(let message) = remote {
+            ContentUnavailableView {
+                Label("검색하지 못했습니다", systemImage: "exclamationmark.triangle")
+            } description: {
+                Text(message)
+            } actions: {
+                Button("다시 시도") { attempt += 1 }.buttonStyle(.bordered)
+            }
+            .padding(.top, 40)
+        } else {
+            ProgressView().frame(maxWidth: .infinity).padding(.top, 60)
+        }
+    }
+
+    private var requestKey: RequestKey {
+        RequestKey(query: normalizedQuery, filter: filter, scope: scope, attempt: attempt)
+    }
+
+    /// Debounced: typing cancels the previous task before its request goes out.
+    private func search() async {
+        let q = normalizedQuery
+        let key = requestKey
+        guard scope == .catalog, !q.isEmpty else { remote = .idle; loadedKey = nil; return }
+        guard key != loadedKey else { return }
+        remote = .loading
+        do {
+            try await Task.sleep(for: .milliseconds(300))
+            let results = try await catalog.search(q, filter: filter)
+            remote = .loaded(results)
+            loadedKey = key
+        } catch {
+            guard !Task.isCancelled else { return }
+            remote = .failed(error.localizedDescription)
+        }
     }
 
     private var recents: some View {
@@ -348,13 +395,13 @@ struct SearchView: View {
 
     private func navigableRow(_ item: BrowseItem) -> some View {
         let kind: String = switch item {
-        case .release(let r): "\(r.kind.label) · \(r.artistName)"
+        case .release(let r): [r.kind?.label, r.artistName].compactMap(\.self).joined(separator: " · ")
         case .playlist(let p): "재생목록 · \(p.owner)"
         case .artist: "아티스트"
         case .track(let t): "노래 · \(t.artist)"
         }
         return HStack(spacing: 12) {
-            ArtworkView(theme: item.artwork, cornerRadius: item.isArtist ? BrowseMetrics.rowArtwork / 2 : 4)
+            ArtworkView(artwork: item.artwork, cornerRadius: item.isArtist ? BrowseMetrics.rowArtwork / 2 : 4)
                 .frame(width: BrowseMetrics.rowArtwork, height: BrowseMetrics.rowArtwork)
             VStack(alignment: .leading, spacing: 1) {
                 Text(item.title).font(.body).lineLimit(1)

@@ -58,7 +58,7 @@ struct FullPlayer: View {
         .foregroundStyle(.white)
         .preferredColorScheme(.dark)
         .background {
-            PlayerBackdrop(theme: player.currentTrack?.artwork ?? .midnight)
+            PlayerBackdrop(theme: player.currentTrack?.artwork.backdropTheme ?? .midnight)
                 .ignoresSafeArea()
         }
         .accessibilityAction(.escape, closePlayer)

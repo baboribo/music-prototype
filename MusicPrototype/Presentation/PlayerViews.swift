@@ -13,7 +13,7 @@ struct MiniPlayer: View {
                 Button(action: openPlayer) {
                     HStack(spacing: 10) {
                         InteractivePlayerElement(role: .miniArtwork, context: transitionContext, cornerRadius: 8) {
-                            ArtworkView(theme: track.artwork)
+                            ArtworkView(artwork: track.artwork)
                         }
                         .frame(width: 36, height: 36)
                         VStack(alignment: .leading, spacing: 2) {

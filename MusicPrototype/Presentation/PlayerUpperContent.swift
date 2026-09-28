@@ -110,7 +110,7 @@ struct PlayerUpperContent: View {
                                  isActive: compact == showingQueue,
                                  isFullyVisible: CGRect(origin: .zero, size: viewport).insetBy(dx: -1, dy: -1).contains(visible),
                                  cornerRadius: radius) {
-            ArtworkView(theme: track.artwork)
+            ArtworkView(artwork: track.artwork)
                 .frame(width: 400, height: 400)
         }
             .frame(width: 400, height: 400)
@@ -213,7 +213,7 @@ struct PlayerUpperContent: View {
                         player.selectUpcoming(upcoming)
                     } label: {
                         HStack(spacing: 12) {
-                            ArtworkView(theme: upcoming.artwork).frame(width: 48, height: 48)
+                            ArtworkView(artwork: upcoming.artwork).frame(width: 48, height: 48)
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(upcoming.title).font(.body)
                                 Text(upcoming.artist).font(.subheadline).foregroundStyle(.white.opacity(0.65))

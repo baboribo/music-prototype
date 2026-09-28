@@ -56,7 +56,7 @@ extension BrowseItem {
         }
     }
 
-    var artwork: ArtworkTheme {
+    var artwork: Artwork {
         switch self {
         case .track(let v): v.artwork
         case .release(let v): v.artwork
@@ -73,12 +73,42 @@ extension View {
     func browseDestinations() -> some View {
         navigationDestination(for: Route.self) { route in
             switch route {
-            case .release(let id): if let r = Catalog.release(id) { ReleaseDetailView(release: r) }
-            case .playlist(let id): if let p = Catalog.playlist(id) { PlaylistDetailView(playlist: p) }
-            case .artist(let id): if let a = Catalog.artist(id) { ArtistDetailView(artist: a) }
+            case .release(let id):
+                ReleaseDestination(id: id)
+            case .playlist(let id):
+                PlaylistDestination(id: id)
+            case .artist(let id):
+                ArtistDestination(id: id)
             case .library(let category): LibraryCategoryView(category: category)
             }
         }
+    }
+}
+
+private struct ReleaseDestination: View {
+    @Environment(\.musicCatalog) private var catalog
+    let id: Release.ID
+
+    var body: some View {
+        CatalogPage { [catalog, id] in try await catalog.release(id) } content: { ReleaseDetailView(detail: $0) }
+    }
+}
+
+private struct ArtistDestination: View {
+    @Environment(\.musicCatalog) private var catalog
+    let id: Artist.ID
+
+    var body: some View {
+        CatalogPage { [catalog, id] in try await catalog.artist(id) } content: { ArtistDetailView(detail: $0) }
+    }
+}
+
+private struct PlaylistDestination: View {
+    @Environment(\.musicCatalog) private var catalog
+    let id: Playlist.ID
+
+    var body: some View {
+        CatalogPage { [catalog, id] in try await catalog.playlist(id) } content: { PlaylistDetailView(detail: $0) }
     }
 }
 
@@ -115,7 +145,7 @@ struct ShelfHeader: View {
 
 /// Centered artwork + title + subtitle + meta line (release and playlist pages).
 struct DetailHeader: View {
-    let artwork: ArtworkTheme
+    let artwork: Artwork
     let title: String
     let subtitle: String
     var subtitleRoute: Route? = nil
@@ -124,7 +154,7 @@ struct DetailHeader: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ArtworkView(theme: artwork, cornerRadius: 10)
+            ArtworkView(artwork: artwork, cornerRadius: 10)
                 .frame(width: BrowseMetrics.headerArtwork, height: BrowseMetrics.headerArtwork)
                 .shadow(color: .black.opacity(0.18), radius: 16, y: 8)
                 .padding(.top, 14)
@@ -134,7 +164,10 @@ struct DetailHeader: View {
                 .padding(.top, 22)
                 .accessibilityAddTraits(.isHeader)
             Group {
-                if let subtitleRoute {
+                if subtitle.isEmpty {
+                    // Mixes and some playlists name no owner.
+                    EmptyView()
+                } else if let subtitleRoute {
                     NavigationLink(value: subtitleRoute) { Text(subtitle) }.buttonStyle(.plain)
                 } else {
                     Text(subtitle)
@@ -256,6 +289,8 @@ struct SongRow: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .disabled(!track.isPlayable)
+            .opacity(track.isPlayable ? 1 : 0.4)
             .accessibilityLabel(subtitle.map { "\(track.title), \($0)" } ?? track.title)
             .accessibilityValue(isCurrent ? (player.isPlaying ? "재생 중" : "일시정지") : "")
             .accessibilityIdentifier("track.\(track.id)")
@@ -299,7 +334,7 @@ struct SongRow: View {
             .frame(width: 22)
             .padding(.trailing, 9)
         case .artwork:
-            ArtworkView(theme: track.artwork, cornerRadius: 4)
+            ArtworkView(artwork: track.artwork, cornerRadius: 4)
                 .frame(width: BrowseMetrics.rowArtwork, height: BrowseMetrics.rowArtwork)
                 .overlay {
                     if isCurrent {
@@ -346,7 +381,7 @@ struct ItemTile: View {
 
     var body: some View {
         VStack(alignment: item.isArtist || centered ? .center : .leading, spacing: 0) {
-            ArtworkView(theme: item.artwork, cornerRadius: item.isArtist ? width / 2 : 6)
+            ArtworkView(artwork: item.artwork, cornerRadius: item.isArtist ? width / 2 : 6)
                 .frame(width: width, height: width)
                 .padding(.bottom, 7)
             Text(item.title)
@@ -418,6 +453,6 @@ struct DetailFooter<Content: View>: View {
 }
 
 func durationSummary(_ tracks: [Track]) -> String {
-    let minutes = Int((tracks.reduce(0) { $0 + $1.duration } / 60).rounded())
+    let minutes = Int((tracks.reduce(0) { $0 + ($1.duration ?? 0) } / 60).rounded())
     return "\(tracks.count)곡, \(minutes)분"
 }
