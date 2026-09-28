@@ -4,3 +4,8 @@
 /.build/
 **/xcuserdata/
 *.xcuserstate
+
+# Spike build output and any local credential/probe files
+Spikes/**/.build/
+Spikes/**/probe-out/
+*.itprobe-auth

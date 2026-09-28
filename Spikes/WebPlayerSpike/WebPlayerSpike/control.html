@@ -1,0 +1,91 @@
+<!doctype html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { font: 17px -apple-system; margin: 20px; }
+  button { font: inherit; padding: 12px 16px; margin: 6px 0; width: 100%; }
+  video { width: 100%; height: 60px; background: #eee; }
+  #status { font: 13px ui-monospace; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h3>Background control test (local tone, no YouTube)</h3>
+<button id="plain">A. Plain file (&lt;video src&gt;)</button>
+<button id="mms">B. ManagedMediaSource (fragmented MP4)</button>
+<button id="mmsinc">C. ManagedMediaSource, incremental streaming</button>
+<button id="stop">Stop</button>
+<video id="v" playsinline></video>
+<div id="status"></div>
+<script>
+const v = document.getElementById('v');
+const status = document.getElementById('status');
+const post = (kind, data) => {
+  status.textContent = `${kind} ${JSON.stringify(data)}\n` + status.textContent.slice(0, 600);
+  try { window.webkit.messageHandlers.probe.postMessage({ kind, ...data }); } catch (e) {}
+};
+let mode = null;
+document.addEventListener('visibilitychange', () => post('control', { event: 'visibility', hidden: document.hidden, mode, time: v.currentTime }));
+['playing', 'pause', 'emptied', 'waiting', 'ended', 'error'].forEach(type =>
+  v.addEventListener(type, () => post('control', { event: type, mode, time: Math.round(v.currentTime * 10) / 10 })));
+setInterval(() => { if (mode && !v.paused) post('control', { event: 'tick', mode, time: Math.round(v.currentTime * 10) / 10, hidden: document.hidden }); }, 5000);
+
+function reset() { v.pause(); v.removeAttribute('src'); v.srcObject = null; v.load(); }
+
+document.getElementById('plain').onclick = () => {
+  reset(); mode = 'plain';
+  v.src = 'spike://local/tone.m4a';
+  v.play().catch(e => post('control', { event: 'playError', mode, reason: String(e) }));
+};
+
+document.getElementById('mms').onclick = async () => {
+  reset(); mode = 'mms';
+  if (!window.ManagedMediaSource) { post('control', { event: 'noMMS' }); return; }
+  const ms = new ManagedMediaSource();
+  // MMS only opens when remote playback is disabled or an AirPlay alternative exists.
+  v.disableRemotePlayback = true;
+  ['startstreaming', 'endstreaming', 'sourceclose', 'sourceended'].forEach(type =>
+    ms.addEventListener(type, () => post('control', { event: 'mms.' + type, time: v.currentTime, hidden: document.hidden })));
+  v.src = URL.createObjectURL(ms);
+  ms.addEventListener('sourceopen', async () => {
+    const sb = ms.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"');
+    const data = await (await fetch('spike://local/tone_frag.mp4')).arrayBuffer();
+    sb.addEventListener('updateend', () => { if (ms.readyState === 'open') ms.endOfStream(); post('control', { event: 'appended', bytes: data.byteLength }); }, { once: true });
+    sb.appendBuffer(data);
+  }, { once: true });
+  v.play().catch(e => post('control', { event: 'playError', mode, reason: String(e) }));
+};
+
+// Keeps ~8 s of audio ahead of the playhead, appending 64 KB at a time, only while
+// the source says it wants data (startstreaming → endstreaming), like a streaming player.
+document.getElementById('mmsinc').onclick = async () => {
+  reset(); mode = 'mms-inc';
+  const ms = new ManagedMediaSource();
+  v.disableRemotePlayback = true;
+  v.src = URL.createObjectURL(ms);
+  await new Promise(r => ms.addEventListener('sourceopen', r, { once: true }));
+  const sb = ms.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"');
+  const data = new Uint8Array(await (await fetch('spike://local/tone_frag.mp4')).arrayBuffer());
+  let offset = 0, appends = 0;
+  const ahead = () => sb.buffered.length ? sb.buffered.end(sb.buffered.length - 1) - v.currentTime : 0;
+  const pump = () => {
+    if (ms.readyState !== 'open' || sb.updating) return;
+    if (offset >= data.length) { ms.endOfStream(); return; }
+    if (!ms.streaming || ahead() > 8) return;
+    const chunk = data.subarray(offset, offset + 65536);
+    offset += chunk.length; appends++;
+    sb.appendBuffer(chunk);
+  };
+  sb.addEventListener('updateend', pump);
+  ['startstreaming', 'endstreaming'].forEach(type =>
+    ms.addEventListener(type, () => { post('control', { event: 'mms.' + type, hidden: document.hidden, ahead: Math.round(ahead()), appends }); pump(); }));
+  setInterval(() => { pump(); if (!v.paused) post('control', { event: 'inc', hidden: document.hidden, time: Math.round(v.currentTime), ahead: Math.round(ahead()), appends, streaming: ms.streaming }); }, 2000);
+  pump();
+  v.play().catch(e => post('control', { event: 'playError', mode, reason: String(e) }));
+};
+
+document.getElementById('stop').onclick = () => { reset(); mode = null; };
+post('control', { event: 'loaded' });
+</script>
+</body>
+</html>
