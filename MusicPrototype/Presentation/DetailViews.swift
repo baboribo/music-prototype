@@ -73,7 +73,7 @@ struct ReleaseDetailView: View {
                 DetailHeader(artwork: release.artwork, title: release.displayTitle, subtitle: release.artistName,
                              subtitleRoute: release.artistID.map(Route.artist), meta: release.meta)
                 PlaybackActions(shuffle: { play(shuffled: true) }, play: { play(shuffled: false) }) {
-                    LibrarySaveButton(id: release.id)
+                    if let membership = detail.membership { LibrarySaveButton(membership: membership) }
                 }
                 .padding(.top, 18)
                 .padding(.bottom, 23)
@@ -179,8 +179,8 @@ struct PlaylistDetailView: View {
                         // Own lists are already in the library; Apple shows download here.
                         Image(systemName: "arrow.down").font(.body.weight(.semibold)).foregroundStyle(.tertiary)
                             .accessibilityLabel("다운로드 (샘플에서는 사용할 수 없음)")
-                    } else {
-                        LibrarySaveButton(id: playlist.id)
+                    } else if let membership = detail.membership {
+                        LibrarySaveButton(membership: membership)
                     }
                 }
                 .padding(.top, 18)

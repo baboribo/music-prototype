@@ -131,6 +131,15 @@ enum ItemParsing {
 
     // MARK: Fields
 
+    /// A page header's save toggle (`BOOKMARK_BORDER` / `BOOKMARK`): its target list and state.
+    static func membership(_ header: JSON?) -> LibraryMembership? {
+        guard let toggle = header?.all("toggleButtonRenderer").first(where: {
+                  $0.at("defaultIcon.iconType")?.string?.hasPrefix("BOOKMARK") == true }),
+              let id = toggle.at("defaultServiceEndpoint.likeEndpoint.target.playlistId")?.string
+        else { return nil }
+        return LibraryMembership(listID: id, isSaved: toggle["isToggled"] == .bool(true))
+    }
+
     /// `EDIT` → the listener's own list; `BOOKMARK*` (save toggle) → someone else's; neither → unknown.
     static func ownership(_ node: JSON?) -> Bool? {
         guard let icons = node?.all("iconType").compactMap(\.string) else { return nil }

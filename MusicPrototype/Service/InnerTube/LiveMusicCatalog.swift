@@ -141,6 +141,12 @@ struct LiveMusicCatalog: MusicCatalog {
             _ = try await client.post(liked ? "like/like" : "like/removelike",
                                       body: ["target": .object(["videoId": .string(videoID)])])
             return [.playlist("VLLM"), .library]
+        case .save(let listID, let saved):
+            // Verified 2026-09-29 (album): the album appears in 보관함 앨범, the library
+            // landing and library search; removing restores the landing exactly.
+            _ = try await client.post(saved ? "like/like" : "like/removelike",
+                                      body: ["target": .object(["playlistId": .string(listID)])])
+            return [.library]
         }
     }
 
@@ -306,7 +312,7 @@ enum ReleaseParsing {
         }
         return ReleaseDetail(release: release, tracks: tracks,
                              queuePlaylistID: root.all("playlistId").lazy.compactMap(\.string).first { $0.hasPrefix("OLAK5uy_") },
-                             shelves: shelves)
+                             shelves: shelves, membership: ItemParsing.membership(header))
     }
 }
 
@@ -371,7 +377,8 @@ enum PlaylistParsing {
             artwork: ItemParsing.artwork(header.at("thumbnail.musicThumbnailRenderer.thumbnail.thumbnails")),
             trackIDs: page.tracks.map(\.id), isOwned: editable != nil ? true : ItemParsing.ownership(header["buttons"]))
         return PlaylistDetail(playlist: playlist, tracks: page.tracks,
-                              summary: header["secondSubtitle"]?.text, next: page.next)
+                              summary: header["secondSubtitle"]?.text, next: page.next,
+                              membership: editable != nil ? nil : ItemParsing.membership(header))
     }
 
     /// A continuation response: the next rows and, if more remain, the next token.

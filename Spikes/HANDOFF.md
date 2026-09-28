@@ -238,6 +238,15 @@ playlistPanelVideoWrapperRenderer
 - replay: write 녹화 없음 → `notRecorded` → 별 즉시 되돌림, 로그 `like write failed, reverted`. Mock: 별 토글 유지(세션 한정), 요청 없음.
 - 미확인: 오류 시 사용자에게 보이는 문구 없음(되돌림만) — 필요 여부는 UI 결정. 행 메뉴에서의 좋아요(SongRow 메뉴)는 기존 UI에 항목이 없어 미연결.
 
+#### A8.2 앨범 보관함 저장 / 해제 [확인, 실제 계정 + Simulator live/mock, 원상복구 확인]
+- 경로 [확인]: 곡 좋아요와 같은 `like/like` / `like/removelike`, body `{target:{playlistId: <OLAK5uy_…>}}`. 응답 toast `보관함에 저장됨` / `보관함에서 삭제되었습니다.`
+- 상태 원천: release header `toggleButtonRenderer`(defaultIcon `BOOKMARK_BORDER`, `isToggled`, default/toggled `likeEndpoint.target.playlistId`) → `ReleaseDetail.membership = LibraryMembership(listID, isSaved)`. 재생목록 header의 같은 toggle도 같은 parser로 `PlaylistDetail.membership`(내 재생목록은 nil) — 계정 검증은 A8.3.
+- probe(Palette `MPREb_WOciJ8HA7tx`): 원상태 toggle off·보관함 앨범 [君のように生きれたら]·landing에 없음·보관함 검색 없음 → 저장: toggle on, 앨범 [Palette, 君の…], **landing 1번 위치**(첫 page 25개 유지, 기존 1개가 밀려남), 보관함 검색 Palette → 해제: 모든 항목 원상태, **landing 첫 page id 순서까지 원 응답과 동일**.
+- 앱: `LibrarySaveButton(membership:)` — 탭 즉시 아이콘 전환, 실패 시 되돌림, 진행 중 재탭 무시. `apply(.save(listID:, Bool))` → `[.library]`. `MockLibrary`(세션 전용 flag) 제거 → Mock catalog가 `Mutex` 저장 집합으로 release/playlist `membership`, 보관함 앨범·재생목록 카테고리, 보관함 검색에 반영.
+- Simulator live: 보관함 root를 먼저 로드 → 검색 → Palette(+, 서버 상태와 일치) → + 탭 → `like/like` 1회, ✓ → 서버 저장 확인 → Library 탭 복귀 시 root `browse` 1회 재로드, 최근 활동 첫 항목 Palette → 앨범 카테고리(Palette 포함) → Palette 페이지(새 로드, ✓) → ✓ 탭 → `like/removelike` 1회 + 열려 있던 앨범 카테고리 `browse` 1회 재로드, Palette 사라짐 → 서버 원상태·landing 동일.
+- Mock: 보관함 EP(Room for Echoes) ✓ → 해제 → 보관함 앨범 카테고리에서 제외(5 → 4). Mock 보관함 root의 고정 그리드는 별도 fixture라 변화 없음.
+- replay 오류 경로는 좋아요(A8.1)와 같은 되돌림 구조, 저장 버튼 자체로는 미실행.
+
 #### 남은 작업 (2026-09-28)
 1. (완료) 보관함 검색 → 서버 보관함 탭(A6.7).
 1a. (완료) 보관함 고정 판정 → 메뉴 toggle 기준(A6.6). pin/unpin 전후 관찰은 보류.

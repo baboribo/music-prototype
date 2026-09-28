@@ -222,20 +222,44 @@ struct PlaybackActions<Trailing: View>: View {
 }
 
 /// "저장" to the YouTube Music library, kept in session state only.
+/// Saves a release or playlist to the library on the service. The icon changes at once
+/// and reverts if the write fails; taps wait for the write in flight.
 struct LibrarySaveButton: View {
-    @Environment(MockLibrary.self) private var library
-    let id: String
+    @Environment(\.musicCatalog) private var catalog
+    @Environment(CatalogChanges.self) private var changes
+    let membership: LibraryMembership
+    @State private var isSaved: Bool
+    @State private var isWriting = false
+
+    init(membership: LibraryMembership) {
+        self.membership = membership
+        _isSaved = State(initialValue: membership.isSaved)
+    }
 
     var body: some View {
-        Button { library.toggle(id) } label: {
-            Image(systemName: library.contains(id) ? "checkmark" : "plus")
+        Button(action: toggle) {
+            Image(systemName: isSaved ? "checkmark" : "plus")
                 .font(.body.weight(.semibold))
                 .contentTransition(.symbolEffect(.replace))
                 .frame(width: 47, height: 47)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(library.contains(id) ? "보관함에서 삭제" : "보관함에 저장")
-        .accessibilityValue("이 기기의 샘플 상태")
+        .accessibilityLabel(isSaved ? "보관함에서 삭제" : "보관함에 저장")
+    }
+
+    private func toggle() {
+        guard !isWriting else { return }
+        let saved = !isSaved
+        isSaved = saved
+        isWriting = true
+        Task {
+            defer { isWriting = false }
+            do {
+                changes.invalidate(try await catalog.apply(.save(listID: membership.listID, saved)))
+            } catch {
+                isSaved = !saved
+            }
+        }
     }
 }
 

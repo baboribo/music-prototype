@@ -1,4 +1,5 @@
 import SwiftUI
+import Synchronization
 
 /// Home as the service lays it out: its shelves, titles and order.
 struct HomeFeed: Sendable {
@@ -36,6 +37,13 @@ enum SearchFilter: CaseIterable, Hashable, Sendable {
     }
 }
 
+/// Whether a release or playlist is saved in the listener's library, and the
+/// id the service saves it under (an album's `OLAK5uy_…` list, a playlist's id).
+struct LibraryMembership: Hashable, Sendable {
+    let listID: String
+    let isSaved: Bool
+}
+
 /// A release page: the release, its tracks in order, and the shelves below them.
 struct ReleaseDetail: Sendable {
     let release: Release
@@ -44,6 +52,8 @@ struct ReleaseDetail: Sendable {
     var queuePlaylistID: String? = nil
     /// Titled by the service ("맞춤 발표곡"); may hold other artists' releases.
     let shelves: [DetailShelf]
+    /// Nil when the page offers no save toggle.
+    var membership: LibraryMembership? = nil
 }
 
 /// Opaque to views; only the catalog that issued it can use it.
@@ -77,6 +87,8 @@ struct PlaylistDetail: Sendable {
     /// The service's own count line ("1,110곡 • 6시간 이상"); nil computes it from `tracks`.
     var summary: String? = nil
     var next: Continuation? = nil
+    /// Nil for the listener's own lists (already in the library) and when unknown.
+    var membership: LibraryMembership? = nil
 }
 
 /// An artist page in the service's own section order.
@@ -160,6 +172,8 @@ enum CatalogError: LocalizedError {
 enum LibraryEdit: Hashable, Sendable {
     /// Like (`true`) or remove the like from a song or video.
     case like(Track.ID, Bool)
+    /// Save (`true`) a release or playlist to the library, or remove it.
+    case save(listID: String, Bool)
 }
 
 /// Data a write can make stale. Views holding that data reload when its revision changes.
@@ -206,6 +220,12 @@ extension EnvironmentValues {
     @Entry var musicCatalog: any MusicCatalog = MockMusicCatalog()
 }
 
+/// Library saves made against the fixtures this session (no service).
+private enum MockSaves {
+    static let ids = Mutex(Set(Catalog.libraryReleases.map(\.id) + Catalog.libraryPlaylists.map(\.id)))
+    static func contains(_ id: String) -> Bool { ids.withLock { $0.contains(id) } }
+}
+
 /// The local fixtures, unchanged from the prototype.
 struct MockMusicCatalog: MusicCatalog {
     func home() async throws -> HomeFeed {
@@ -221,9 +241,9 @@ struct MockMusicCatalog: MusicCatalog {
         let q = query
         let inLibrary = scope == .library
         let artists = (inLibrary ? Catalog.libraryArtists : Catalog.artists).filter { $0.name.localizedStandardContains(q) }.map(BrowseItem.artist)
-        let releases = (inLibrary ? Catalog.libraryReleases : Catalog.releases).filter { "\($0.title) \($0.artistName)".localizedStandardContains(q) }.map(BrowseItem.release)
+        let releases = (inLibrary ? Catalog.releases.filter { MockSaves.contains($0.id) } : Catalog.releases).filter { "\($0.title) \($0.artistName)".localizedStandardContains(q) }.map(BrowseItem.release)
         // Like the service, the library scope finds only the listener's own playlists.
-        let playlists = (inLibrary ? Catalog.libraryPlaylists.filter { $0.kind == .user } : Catalog.playlists)
+        let playlists = (inLibrary ? Catalog.playlists.filter { $0.kind == .user && MockSaves.contains($0.id) } : Catalog.playlists)
             .filter { "\($0.title) \($0.owner)".localizedStandardContains(q) }.map(BrowseItem.playlist)
         let songs = (inLibrary ? Catalog.librarySongs : Catalog.tracks).filter { "\($0.title) \($0.artist) \($0.album)".localizedStandardContains(q) }.map(BrowseItem.track)
         let items: [BrowseItem] = switch filter {
@@ -242,12 +262,15 @@ struct MockMusicCatalog: MusicCatalog {
         return ReleaseDetail(
             release: release, tracks: Catalog.tracks(of: release),
             shelves: more.isEmpty ? [] : [DetailShelf(id: "more", title: "\(release.artistName)의 다른 음악",
-                                                      route: release.artistID.map(Route.artist), items: more)])
+                                                      route: release.artistID.map(Route.artist), items: more)],
+            membership: LibraryMembership(listID: release.id, isSaved: MockSaves.contains(release.id)))
     }
 
     func playlist(_ id: Playlist.ID) async throws -> PlaylistDetail {
         guard let playlist = Catalog.playlist(id) else { throw CatalogError.notFound }
-        return PlaylistDetail(playlist: playlist, tracks: Catalog.tracks(of: playlist))
+        return PlaylistDetail(playlist: playlist, tracks: Catalog.tracks(of: playlist),
+                              membership: playlist.isListenersOwn ? nil
+                                  : LibraryMembership(listID: playlist.id, isSaved: MockSaves.contains(playlist.id)))
     }
 
     func playlistPage(_ continuation: PlaylistDetail.Continuation) async throws -> PlaylistDetail.Page {
@@ -260,9 +283,9 @@ struct MockMusicCatalog: MusicCatalog {
 
     func library(_ category: LibraryCategory) async throws -> LibraryPage {
         let items: [BrowseItem] = switch category {
-        case .playlists: Catalog.libraryPlaylists.map(BrowseItem.playlist)
+        case .playlists: Catalog.playlists.filter { MockSaves.contains($0.id) }.map(BrowseItem.playlist)
         case .songs: Catalog.librarySongs.map(BrowseItem.track)
-        case .albums: Catalog.libraryReleases.map(BrowseItem.release)
+        case .albums: Catalog.releases.filter { MockSaves.contains($0.id) }.map(BrowseItem.release)
         case .artists: Catalog.libraryArtists.map(BrowseItem.artist)
         }
         return LibraryPage(items: items)
@@ -303,7 +326,12 @@ struct MockMusicCatalog: MusicCatalog {
     /// Fixtures don't change; the scopes are still reported so views exercise their reload.
     func apply(_ edit: LibraryEdit) async throws -> Set<CatalogScope> {
         switch edit {
-        case .like: [.playlist("liked"), .library]
+        case .like: return [.playlist("liked"), .library]
+        case .save(let id, let saved):
+            MockSaves.ids.withLock { ids in
+                if saved { ids.insert(id) } else { ids.remove(id) }
+            }
+            return [.library]
         }
     }
 
