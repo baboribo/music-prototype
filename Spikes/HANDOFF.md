@@ -197,14 +197,22 @@ playlistPanelVideoWrapperRenderer
   - 보관함 고정 판정을 badge → 메뉴 toggle(`KEEP_OFF`) 기준으로 변경, badge는 toggle이 없을 때만 fallback. live 보관함 고정 1개 → 2개(좋아요 표시한 음악, 몽환적인 믹스); 세 번째 고정(たま★ふぁんこっと, 동영상)은 보관함 landing 응답에 없음.
   - Mock Home/보관함 동일.
 
+#### A6.7 Library 읽기 마무리 [확인, Simulator live/mock/replay]
+- **보관함 검색 = 서버 scope**: `MusicCatalog.search(_:filter:scope:)`. live 보관함 scope는 검색 응답의 보관함 탭 params(`agIYBA==`), 필터는 그 탭의 chip params(노래 `EgWKAQIIAWoIEAUQCRADGAQ=`, 앨범 `…IYAWoI…`, 아티스트 `…IgAWoI…`). 재생목록 chip은 보관함 탭에서 관찰되지 않아 탭 결과를 재생목록 종류로만 좁힘. 결과는 응답의 **selected 탭**에서 읽음(이전엔 tabs[0] 고정). 남이 만든 저장 재생목록 제외는 서버 semantics 그대로(보정 없음). 로컬 fixture 필터와 `MockLibrary` 의존 제거. Mock은 fixture 보관함 항목만 검색(자기 재생목록만).
+  - live: "Miku" → 아티스트 Satsuki, 앨범 2, 노래 2(A6.5 조사와 동일); 노래 필터 → 2곡; "ASMR" → 결과 없음. replay 미녹화 → 오류·다시 시도.
+- **아티스트 두 domain**: `LibraryArtistScope`(`.library` = `FEmusic_library_corpus_track_artists`, "N곡" / `.subscribed` = `FEmusic_library_corpus_artists`, "구독자 N명"). `Artist.byline`에 목록의 서버 부제를 보존. 아티스트 화면 상단 segmented `보관함 / 구독`(`safeAreaInset`이라 목록 로딩 중에도 유지), 목록은 scope별 `CatalogPage`.
+  - 선택 이유: 보관함 root 구조를 바꾸지 않고, 둘 다 "아티스트"라서 같은 화면에서 비교·전환이 자연스럽다. 별도 category 행은 root를 바꾸고, 합친 목록은 부제·의미가 섞인다.
+  - 흐름 확인: 보관함 → 아티스트(442명, "27곡") → 구독(3명, "구독자 …") → 아티스트 페이지 → 뒤로 시 선택한 scope 유지. 보관함 아티스트 탭도 채널 아티스트 페이지로 이동(MPLA 보관함 곡 목록 페이지는 여전히 미사용). Mock 구독 2명(fixture).
+- write action은 미구현(A6.5-4 inventory 유지).
+
 #### 남은 작업 (2026-09-28)
-1. 보관함 검색 scope → 서버 보관함 탭(`agIYBA==`)으로 연결 가능(A6.5-1), 범위 차이 문구 결정 필요.
+1. (완료) 보관함 검색 → 서버 보관함 탭(A6.7).
 1a. (완료) 보관함 고정 판정 → 메뉴 toggle 기준(A6.6). pin/unpin 전후 관찰은 보류.
-1b. 아티스트 vs 구독 아티스트 UI 결정(A6.5-3).
+1b. (완료) 아티스트 보관함/구독 scope(A6.7). 남음: 보관함 아티스트의 MPLA(보관함 곡 목록) 목적지 사용 여부.
 2. Queue domain: `primary + optional counterpart + segmentMap`(`/next`) 반영 — 미착수. 현재 Mix/라디오는 MockPlayer 로컬 순서.
 3. 쓰기 동작 미구현 — A6.5-4 inventory 기준으로 범위 결정 필요(재생목록 삭제·추천 안 함은 비가역).
 4. B2 실험(sig/n만 적용 시 200 여부) — 사용자 승인 대기.
-5. A6 변경 미commit.
+5. A6.7 변경 미commit.
 
 ### B. Native playback spike (본 앱과 분리)
 조사 [가설 — 외부 자료, 이 환경 미검증]:

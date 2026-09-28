@@ -141,10 +141,30 @@ struct GridTile: View {
 struct LibraryCategoryView: View {
     @Environment(\.musicCatalog) private var catalog
     let category: LibraryCategory
+    /// Artists in the library and subscribed artists are separate lists on the service.
+    @State private var artistScope: LibraryArtistScope = .library
 
     var body: some View {
-        CatalogPage { [catalog, category] in try await catalog.library(category) } content: { page in
-            LibraryCategoryList(category: category, first: page)
+        Group {
+            if category == .artists {
+                CatalogPage { [catalog, artistScope] in try await catalog.libraryArtists(artistScope) } content: { page in
+                    LibraryCategoryList(category: category, first: page)
+                }
+                .id(artistScope)
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    Picker("아티스트 범위", selection: $artistScope) {
+                        ForEach(LibraryArtistScope.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.horizontal, BrowseMetrics.margin)
+                    .padding(.bottom, 8)
+                    .accessibilityIdentifier("library.artists.scope")
+                }
+            } else {
+                CatalogPage { [catalog, category] in try await catalog.library(category) } content: { page in
+                    LibraryCategoryList(category: category, first: page)
+                }
+            }
         }
         .navigationTitle(category.title)
         .navigationBarTitleDisplayMode(.large)
@@ -257,7 +277,7 @@ private struct LibraryCategoryList: View {
             LazyVStack(spacing: 0) {
                 ForEach(artists) { artist in
                     NavigationLink(value: Route.artist(artist.id)) {
-                        listRow(artwork: artist.artwork, circle: true, size: 44, title: artist.name, subtitle: nil)
+                        listRow(artwork: artist.artwork, circle: true, size: 44, title: artist.name, subtitle: artist.byline)
                     }
                     .buttonStyle(.plain)
                     .onAppear { loadMoreIfLast("artist.\(artist.id)") }
@@ -303,7 +323,7 @@ private struct LibraryCategoryList: View {
 
 // MARK: Search
 
-enum SearchScope: Hashable { case catalog, library }
+
 
 /// Session-only recent searches (both apps show them on the empty Search page).
 @MainActor
@@ -322,7 +342,6 @@ final class SearchHistory {
 
 struct SearchView: View {
     @Environment(MockPlayer.self) private var player
-    @Environment(MockLibrary.self) private var library
     @Environment(SearchHistory.self) private var history
     @Environment(\.musicCatalog) private var catalog
     let query: String
@@ -350,22 +369,6 @@ struct SearchView: View {
 
     private var normalizedQuery: String { query.trimmingCharacters(in: .whitespacesAndNewlines) }
 
-    /// Library scope still filters the local library (the Library step replaces it).
-    private var libraryResults: [BrowseItem] {
-        let q = normalizedQuery
-        guard !q.isEmpty else { return [] }
-        let releases = Catalog.releases.filter { library.contains($0.id) && "\($0.title) \($0.artistName)".localizedStandardContains(q) }.map(BrowseItem.release)
-        let playlists = Catalog.playlists.filter { library.contains($0.id) && "\($0.title) \($0.owner)".localizedStandardContains(q) }.map(BrowseItem.playlist)
-        let songs = Catalog.librarySongs.filter { "\($0.title) \($0.artist) \($0.album)".localizedStandardContains(q) }.map(BrowseItem.track)
-        switch filter {
-        case .top: return songs + releases + playlists
-        case .songs: return songs
-        case .albums: return releases
-        case .artists: return []
-        case .playlists: return playlists
-        }
-    }
-
     var body: some View {
         Group {
             if normalizedQuery.isEmpty {
@@ -390,10 +393,10 @@ struct SearchView: View {
     }
 
     @ViewBuilder private var resultsContent: some View {
-        let items: [BrowseItem]? = switch (scope, remote) {
-        case (.library, _): libraryResults
-        case (.catalog, .loaded(let results)): (results.top.map { [$0] } ?? []) + results.items
-        default: nil
+        let items: [BrowseItem]? = if case .loaded(let results) = remote {
+            (results.top.map { [$0] } ?? []) + results.items
+        } else {
+            nil
         }
         if let items {
             if items.isEmpty {
@@ -425,12 +428,12 @@ struct SearchView: View {
     private func search() async {
         let q = normalizedQuery
         let key = requestKey
-        guard scope == .catalog, !q.isEmpty else { remote = .idle; loadedKey = nil; return }
+        guard !q.isEmpty else { remote = .idle; loadedKey = nil; return }
         guard key != loadedKey else { return }
         remote = .loading
         do {
             try await Task.sleep(for: .milliseconds(300))
-            let results = try await catalog.search(q, filter: filter)
+            let results = try await catalog.search(q, filter: filter, scope: scope)
             remote = .loaded(results)
             loadedKey = key
         } catch {

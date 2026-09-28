@@ -89,11 +89,13 @@ enum ItemParsing {
                 owner: byline.first { !isCount($0) } ?? "", description: nil,
                 artwork: artwork, trackIDs: []))
         case "MUSIC_PAGE_TYPE_ARTIST":
-            return .artist(Artist(id: id, name: title, artwork: artwork, description: nil, sections: []))
+            return .artist(Artist(id: id, name: title, artwork: artwork, description: nil, sections: [],
+                                  byline: byline.joined(separator: separator).nilIfEmpty))
         case "MUSIC_PAGE_TYPE_LIBRARY_ARTIST":
             // Library artists browse as "MPLA" + the channel id; the app opens the artist page.
             let channel = id.hasPrefix("MPLA") ? String(id.dropFirst(4)) : id
-            return .artist(Artist(id: channel, name: title, artwork: artwork, description: nil, sections: []))
+            return .artist(Artist(id: channel, name: title, artwork: artwork, description: nil, sections: [],
+                                  byline: byline.joined(separator: separator).nilIfEmpty))
         default:
             return nil
         }
@@ -176,7 +178,7 @@ enum ItemParsing {
     }
 
     private static func isTypeLabel(_ text: String) -> Bool {
-        ["재생목록", "playlist", "노래", "song", "동영상", "video", "앨범", "album", "싱글", "single", "ep"]
+        ["재생목록", "playlist", "노래", "song", "동영상", "video", "앨범", "album", "싱글", "single", "ep", "아티스트", "artist"]
             .contains(text.lowercased())
     }
 
@@ -212,4 +214,8 @@ enum ItemParsing {
         }
         return URL(string: url).map(Artwork.remote) ?? .theme(.midnight)
     }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }

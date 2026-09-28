@@ -47,10 +47,16 @@ struct LiveMusicCatalog: MusicCatalog {
         return feed
     }
 
-    func search(_ query: String, filter: SearchFilter) async throws -> SearchResults {
+    func search(_ query: String, filter: SearchFilter, scope: SearchScope) async throws -> SearchResults {
         var body: [String: JSON] = ["query": .string(query)]
-        if let params = SearchParsing.params[filter] { body["params"] = .string(params) }
-        return SearchParsing.results(try await client.post("search", body: body))
+        let params = scope == .library ? SearchParsing.libraryParams[filter] : SearchParsing.params[filter]
+        if let params { body["params"] = .string(params) }
+        var results = SearchParsing.results(try await client.post("search", body: body))
+        if scope == .library, filter == .playlists {
+            // No playlist chip is known for the library tab; narrow its own results by kind.
+            results.items = results.items.filter { if case .playlist = $0 { true } else { false } }
+        }
+        return results
     }
 
     func release(_ id: Release.ID) async throws -> ReleaseDetail {
@@ -85,6 +91,13 @@ struct LiveMusicCatalog: MusicCatalog {
         return LibraryParsing.page(try await client.post("browse", body: ["browseId": .string(id)]))
     }
 
+    func libraryArtists(_ scope: LibraryArtistScope) async throws -> LibraryPage {
+        switch scope {
+        case .library: try await library(.artists)
+        case .subscribed: LibraryParsing.page(try await client.post("browse", body: ["browseId": "FEmusic_library_corpus_artists"]))
+        }
+    }
+
     func libraryPage(_ continuation: CatalogContinuation) async throws -> LibraryPage {
         LibraryParsing.page(try await client.post("browse", body: ["continuation": .string(continuation.token)]))
     }
@@ -101,7 +114,8 @@ struct LiveMusicCatalog: MusicCatalog {
 private struct FailingCatalog: MusicCatalog {
     let error: any Error
     func home() async throws -> HomeFeed { throw error }
-    func search(_ query: String, filter: SearchFilter) async throws -> SearchResults { throw error }
+    func search(_ query: String, filter: SearchFilter, scope: SearchScope) async throws -> SearchResults { throw error }
+    func libraryArtists(_ scope: LibraryArtistScope) async throws -> LibraryPage { throw error }
     func release(_ id: Release.ID) async throws -> ReleaseDetail { throw error }
     func artist(_ id: Artist.ID) async throws -> ArtistDetail { throw error }
     func playlist(_ id: Playlist.ID) async throws -> PlaylistDetail { throw error }
@@ -122,8 +136,21 @@ enum SearchParsing {
         .playlists: "EgeKAQQoADgBahIQBRAJEAMQDhAKEAQQEBAVEBE=",
     ]
 
+    /// The search page's 보관함 tab (`agIYBA==`) and the chips it offers there.
+    /// Its playlist chip hasn't been observed, so 재생목록 uses the tab itself.
+    static let libraryParams: [SearchFilter: String] = [
+        .top: "agIYBA==",
+        .songs: "EgWKAQIIAWoIEAUQCRADGAQ=",
+        .albums: "EgWKAQIYAWoIEAUQCRADGAQ=",
+        .artists: "EgWKAQIgAWoIEAUQCRADGAQ=",
+        .playlists: "agIYBA==",
+    ]
+
     static func results(_ root: JSON) -> SearchResults {
-        let list = root.at("contents.tabbedSearchResultsRenderer.tabs.0.tabRenderer.content.sectionListRenderer")
+        // The response carries every scope's tab; results sit in the selected one.
+        let tabs = root.at("contents.tabbedSearchResultsRenderer.tabs")?.array ?? []
+        let tab = tabs.first { $0.at("tabRenderer.selected") == .bool(true) } ?? tabs.first
+        let list = tab?.at("tabRenderer.content.sectionListRenderer")
         var top: BrowseItem?
         var items: [BrowseItem] = []
         for node in list?["contents"]?.array ?? [] {

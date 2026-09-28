@@ -101,6 +101,8 @@ struct Artist: Identifiable, Hashable, Sendable {
     let description: String?
     /// Ordered as the artist page returns them; the view never invents sections.
     let sections: [ArtistSection]
+    /// The listing's own second line: "27곡" for library artists, "구독자 60.1만명" for subscriptions.
+    var byline: String? = nil
 }
 
 struct ArtistSection: Hashable, Sendable {
@@ -340,4 +342,6 @@ enum Catalog {
     static let librarySongs: [Track] = tracks(["quiet-map", "lantern-circuit", "midnight-window", "three-seventeen", "last-train", "sideways-rain", "folded-night"])
     static let libraryReleases: [Release] = [releases[0], releases[2], releases[3], releases[5], releases[6]]
     static let libraryArtists: [Artist] = artists
+    /// Fixture subscriptions: a different set from the library's artists, as on the service.
+    static let subscribedArtists: [Artist] = [artists[0], artists[4]]
 }

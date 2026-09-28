@@ -109,6 +109,26 @@ struct DetailShelf: Identifiable, Sendable {
     let items: [BrowseItem]
 }
 
+/// YouTube Music searches either its catalog or the listener's library. The library
+/// scope is the service's own: it covers library songs, albums, artists and the
+/// listener's own playlists, but not other people's saved playlists.
+enum SearchScope: Hashable, Sendable { case catalog, library }
+
+/// The 아티스트 screen's two lists, which are different things on the service.
+enum LibraryArtistScope: Hashable, Sendable, CaseIterable {
+    /// Artists of the songs in the library ("27곡").
+    case library
+    /// Subscribed artist channels ("구독자 N명").
+    case subscribed
+
+    var title: String {
+        switch self {
+        case .library: "보관함"
+        case .subscribed: "구독"
+        }
+    }
+}
+
 /// One page of catalog search; `top` is the service's highlighted result.
 struct SearchResults: Sendable {
     var top: BrowseItem?
@@ -138,13 +158,14 @@ enum CatalogError: LocalizedError {
 /// made and authenticated stays behind this boundary.
 protocol MusicCatalog: Sendable {
     func home() async throws -> HomeFeed
-    func search(_ query: String, filter: SearchFilter) async throws -> SearchResults
+    func search(_ query: String, filter: SearchFilter, scope: SearchScope) async throws -> SearchResults
     func release(_ id: Release.ID) async throws -> ReleaseDetail
     func artist(_ id: Artist.ID) async throws -> ArtistDetail
     func playlist(_ id: Playlist.ID) async throws -> PlaylistDetail
     func playlistPage(_ continuation: PlaylistDetail.Continuation) async throws -> PlaylistDetail.Page
     func library() async throws -> LibraryFeed
     func library(_ category: LibraryCategory) async throws -> LibraryPage
+    func libraryArtists(_ scope: LibraryArtistScope) async throws -> LibraryPage
     func libraryPage(_ continuation: CatalogContinuation) async throws -> LibraryPage
 }
 
@@ -163,12 +184,15 @@ struct MockMusicCatalog: MusicCatalog {
         ], isSample: true)
     }
 
-    func search(_ query: String, filter: SearchFilter) async throws -> SearchResults {
+    func search(_ query: String, filter: SearchFilter, scope: SearchScope) async throws -> SearchResults {
         let q = query
-        let artists = Catalog.artists.filter { $0.name.localizedStandardContains(q) }.map(BrowseItem.artist)
-        let releases = Catalog.releases.filter { "\($0.title) \($0.artistName)".localizedStandardContains(q) }.map(BrowseItem.release)
-        let playlists = Catalog.playlists.filter { "\($0.title) \($0.owner)".localizedStandardContains(q) }.map(BrowseItem.playlist)
-        let songs = Catalog.tracks.filter { "\($0.title) \($0.artist) \($0.album)".localizedStandardContains(q) }.map(BrowseItem.track)
+        let inLibrary = scope == .library
+        let artists = (inLibrary ? Catalog.libraryArtists : Catalog.artists).filter { $0.name.localizedStandardContains(q) }.map(BrowseItem.artist)
+        let releases = (inLibrary ? Catalog.libraryReleases : Catalog.releases).filter { "\($0.title) \($0.artistName)".localizedStandardContains(q) }.map(BrowseItem.release)
+        // Like the service, the library scope finds only the listener's own playlists.
+        let playlists = (inLibrary ? Catalog.libraryPlaylists.filter { $0.kind == .user } : Catalog.playlists)
+            .filter { "\($0.title) \($0.owner)".localizedStandardContains(q) }.map(BrowseItem.playlist)
+        let songs = (inLibrary ? Catalog.librarySongs : Catalog.tracks).filter { "\($0.title) \($0.artist) \($0.album)".localizedStandardContains(q) }.map(BrowseItem.track)
         let items: [BrowseItem] = switch filter {
         case .top: artists + songs + releases + playlists
         case .songs: songs
@@ -209,6 +233,13 @@ struct MockMusicCatalog: MusicCatalog {
         case .artists: Catalog.libraryArtists.map(BrowseItem.artist)
         }
         return LibraryPage(items: items)
+    }
+
+    func libraryArtists(_ scope: LibraryArtistScope) async throws -> LibraryPage {
+        switch scope {
+        case .library: try await library(.artists)
+        case .subscribed: LibraryPage(items: Catalog.subscribedArtists.map(BrowseItem.artist))
+        }
     }
 
     func libraryPage(_ continuation: CatalogContinuation) async throws -> LibraryPage {
