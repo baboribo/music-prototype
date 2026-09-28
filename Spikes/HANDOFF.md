@@ -247,6 +247,12 @@ playlistPanelVideoWrapperRenderer
 - Mock: 보관함 EP(Room for Echoes) ✓ → 해제 → 보관함 앨범 카테고리에서 제외(5 → 4). Mock 보관함 root의 고정 그리드는 별도 fixture라 변화 없음.
 - replay 오류 경로는 좋아요(A8.1)와 같은 되돌림 구조, 저장 버튼 자체로는 미실행.
 
+#### A8.3 (남의) 재생목록 보관함 저장 / 해제 [확인, 실제 계정 + Simulator live, 원상복구 확인, 코드 변경 없음]
+- A8.2와 같은 경로·코드: header toggle target `playlistId`(= browseId에서 `VL` 뺀 `PL…`), `like/like` / `like/removelike`.
+- 대상: IU's Palette(아이유를사랑해요, `VLPLgFYH-…`, 검색 인기 결과에서 진입 — "재생목록" 필터는 서버 추천 재생목록 chip이라 커뮤니티 재생목록이 안 나옴, A2 기록과 같음).
+- probe 원상태: toggle off, 보관함 재생목록 첫 page(26)·landing에 없음 → 앱 + 탭: `like/like` 1회, ✓, 서버 toggle on·재생목록 목록 3번째·landing 2번째 → ✓ 탭: `like/removelike` 1회, +, 서버 toggle off·**재생목록 첫 page와 landing 모두 원 응답과 동일**.
+- 내 재생목록은 기존대로 다운로드 자리(저장 버튼 없음, `membership` nil).
+
 #### 남은 작업 (2026-09-28)
 1. (완료) 보관함 검색 → 서버 보관함 탭(A6.7).
 1a. (완료) 보관함 고정 판정 → 메뉴 toggle 기준(A6.6). pin/unpin 전후 관찰은 보류.
