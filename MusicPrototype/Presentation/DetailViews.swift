@@ -1,11 +1,16 @@
 import SwiftUI
 
-/// Loads a catalog page by id with loading, failure and retry states.
+/// Loads a catalog page by id with loading, failure and retry states. When a write
+/// changes `scope`, the page reloads in place (keeping what it shows if that fails).
 struct CatalogPage<Value: Sendable, Content: View>: View {
+    @Environment(CatalogChanges.self) private var changes
+    var scope: CatalogScope? = nil
     let load: () async throws -> Value
     @ViewBuilder let content: (Value) -> Content
     @State private var phase: Phase = .loading
     @State private var attempt = 0
+    /// The scope revision the shown value was loaded at.
+    @State private var loadedRevision = 0
 
     private enum Phase {
         case loading
@@ -19,7 +24,8 @@ struct CatalogPage<Value: Sendable, Content: View>: View {
             case .loading:
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             case .loaded(let value):
-                content(value)
+                // A reloaded value starts its content fresh (paging state included).
+                content(value).id(loadedRevision)
             case .failed(let message):
                 ContentUnavailableView {
                     Label("페이지를 불러오지 못했습니다", systemImage: "exclamationmark.triangle")
@@ -32,14 +38,25 @@ struct CatalogPage<Value: Sendable, Content: View>: View {
         }
         .task(id: attempt) {
             guard case .loading = phase else { return }
+            let revision = currentRevision
             do {
                 phase = .loaded(try await load())
+                loadedRevision = revision
             } catch {
                 guard !Task.isCancelled else { return }
                 phase = .failed(error.localizedDescription)
             }
         }
+        .task(id: currentRevision) {
+            let revision = currentRevision
+            guard case .loaded = phase, revision != loadedRevision,
+                  let value = try? await load(), !Task.isCancelled else { return }
+            phase = .loaded(value)
+            loadedRevision = revision
+        }
     }
+
+    private var currentRevision: Int { scope.map(changes.revision) ?? 0 }
 }
 
 /// Album, Single and EP share Apple Music's release page; only the kind label differs.

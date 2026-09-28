@@ -374,7 +374,6 @@ private struct PlayerTrackIdentity: View {
                 .font(.system(size: 20)).frame(width: 44, height: 44)
         }
         .accessibilityLabel(player.isCurrentTrackFavorite ? "즐겨찾기에서 제거" : "즐겨찾기에 추가")
-        .accessibilityValue("이 기기의 샘플 상태")
         .accessibilityIdentifier("player.favorite")
     }
 
@@ -383,7 +382,6 @@ private struct PlayerTrackIdentity: View {
             Button(player.isCurrentTrackFavorite ? "즐겨찾기에서 제거" : "즐겨찾기에 추가", systemImage: player.isCurrentTrackFavorite ? "star.slash" : "star") {
                 player.toggleFavorite()
             }
-            Text("로컬 샘플 곡 · 온라인 기능 없음")
         } label: {
             Image(systemName: "ellipsis").font(.system(size: 20, weight: .semibold))
                 .frame(width: 44, height: 44)

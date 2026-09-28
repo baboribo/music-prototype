@@ -156,6 +156,33 @@ enum CatalogError: LocalizedError {
     }
 }
 
+/// A reversible change to the listener's account. Each case has an exact inverse.
+enum LibraryEdit: Hashable, Sendable {
+    /// Like (`true`) or remove the like from a song or video.
+    case like(Track.ID, Bool)
+}
+
+/// Data a write can make stale. Views holding that data reload when its revision changes.
+enum CatalogScope: Hashable, Sendable {
+    /// One playlist's page (the liked-music list for likes).
+    case playlist(Playlist.ID)
+    /// The library root, its category lists and library-scoped search.
+    case library
+}
+
+/// Revisions per scope; a completed write bumps the scopes it affected.
+@MainActor
+@Observable
+final class CatalogChanges {
+    private var revisions: [CatalogScope: Int] = [:]
+
+    func revision(_ scope: CatalogScope) -> Int { revisions[scope, default: 0] }
+
+    func invalidate(_ scopes: Set<CatalogScope>) {
+        for scope in scopes { revisions[scope, default: 0] += 1 }
+    }
+}
+
 /// Where browse data comes from. Views ask for domain values; how requests are
 /// made and authenticated stays behind this boundary.
 protocol MusicCatalog: Sendable {
@@ -171,6 +198,8 @@ protocol MusicCatalog: Sendable {
     func libraryPage(_ continuation: CatalogContinuation) async throws -> LibraryPage
     func queue(_ seed: QueueSeed) async throws -> QueuePage
     func queuePage(_ continuation: CatalogContinuation) async throws -> QueuePage
+    /// Applies the edit on the service; returns the scopes whose data it changed.
+    func apply(_ edit: LibraryEdit) async throws -> Set<CatalogScope>
 }
 
 extension EnvironmentValues {
@@ -269,6 +298,13 @@ struct MockMusicCatalog: MusicCatalog {
 
     func queuePage(_ continuation: CatalogContinuation) async throws -> QueuePage {
         throw CatalogError.notFound
+    }
+
+    /// Fixtures don't change; the scopes are still reported so views exercise their reload.
+    func apply(_ edit: LibraryEdit) async throws -> Set<CatalogScope> {
+        switch edit {
+        case .like: [.playlist("liked"), .library]
+        }
     }
 
     func artist(_ id: Artist.ID) async throws -> ArtistDetail {

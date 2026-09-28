@@ -27,6 +27,8 @@ enum MediaKind: Hashable, Sendable {
 struct QueueVariant: Hashable, Sendable {
     let track: Track
     let kind: MediaKind
+    /// The listener's like on this media when the service said; nil when unknown.
+    var isLiked: Bool? = nil
 }
 
 /// How positions line up between an entry's primary and counterpart media.

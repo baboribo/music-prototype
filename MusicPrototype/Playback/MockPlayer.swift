@@ -1,5 +1,6 @@
 import Observation
 import Foundation
+import OSLog
 
 /// Queue state from the catalog with mock transport: no audio, timers, or system
 /// media session. The queue is the service's (`/next`) when the catalog is live,
@@ -25,7 +26,10 @@ final class MockPlayer {
     private var selectedIndex = 0
     /// Whether the current entry is showing its counterpart (song ↔ video).
     private(set) var isShowingCounterpart = false
-    private var favoriteTrackIDs: Set<Track.ID> = []
+    /// Likes as the service last reported them (queue rows) or as this session set them.
+    private var likes: [Track.ID: Bool] = [:]
+    /// Likes with a write in flight; queue pages don't overwrite them meanwhile.
+    private var pendingLikes: Set<Track.ID> = []
     private(set) var isShuffling = false
     private(set) var isRepeating = false
     /// Where the current queue came from, shown in the Queue header
@@ -39,9 +43,12 @@ final class MockPlayer {
     private var pageTask: Task<Void, Never>?
 
     private let catalog: any MusicCatalog
+    private let changes: CatalogChanges
+    private static let log = Logger(subsystem: "MusicPrototype", category: "Player")
 
-    init(catalog: any MusicCatalog) {
+    init(catalog: any MusicCatalog, changes: CatalogChanges) {
         self.catalog = catalog
+        self.changes = changes
     }
 
     // MARK: Current entry
@@ -72,17 +79,36 @@ final class MockPlayer {
         position = min(mapped ?? 0, duration)
     }
 
-    func isFavorite(_ id: Track.ID) -> Bool { favoriteTrackIDs.contains(id) }
+    func isFavorite(_ id: Track.ID) -> Bool { likes[id] == true }
 
     var isCurrentTrackFavorite: Bool {
-        currentTrack.map { favoriteTrackIDs.contains($0.id) } ?? false
+        currentTrack.map { isFavorite($0.id) } ?? false
     }
 
-    // Session-only fixture feedback; never writes to a service or device library.
+    /// The star is the service's like. It changes at once and reverts if the write fails;
+    /// a second tap waits for the first write.
     func toggleFavorite() {
-        guard let id = currentTrack?.id else { return }
-        if favoriteTrackIDs.contains(id) { favoriteTrackIDs.remove(id) }
-        else { favoriteTrackIDs.insert(id) }
+        guard let id = currentTrack?.id, !pendingLikes.contains(id) else { return }
+        let liked = !isFavorite(id)
+        likes[id] = liked
+        pendingLikes.insert(id)
+        Task { [catalog] in
+            defer { pendingLikes.remove(id) }
+            do {
+                changes.invalidate(try await catalog.apply(.like(id, liked)))
+            } catch {
+                likes[id] = !liked
+                Self.log.error("like write failed, reverted: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    /// Takes the service's like state for rows it reported, except likes being written.
+    private func recordLikes(_ items: [QueueItem]) {
+        for variant in items.flatMap({ [$0.primary] + ($0.counterpart.map { [$0] } ?? []) }) {
+            guard let liked = variant.isLiked, !pendingLikes.contains(variant.track.id) else { continue }
+            likes[variant.track.id] = liked
+        }
     }
 
     // MARK: Queue order
@@ -207,6 +233,7 @@ final class MockPlayer {
     private func apply(_ page: QueuePage) {
         let previous = currentTrack?.id
         guard !page.items.isEmpty else { queueStatus = .idle; return }
+        recordLikes(page.items)
         if let selected = page.selectedIndex, page.items[selected].isPlayable {
             queue = page.items
             selectedIndex = selected
@@ -236,6 +263,7 @@ final class MockPlayer {
                 guard !Task.isCancelled, continuation == token else { return }
                 let known = Set(queue.map(\.id))
                 let added = page.items.filter { !known.contains($0.id) }
+                recordLikes(added)
                 queue += added
                 unshuffledOrder += added
                 continuation = page.next

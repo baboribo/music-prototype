@@ -108,7 +108,7 @@ private struct PlaylistDestination: View {
     let id: Playlist.ID
 
     var body: some View {
-        CatalogPage { [catalog, id] in try await catalog.playlist(id) } content: { PlaylistDetailView(detail: $0) }
+        CatalogPage(scope: .playlist(id)) { [catalog, id] in try await catalog.playlist(id) } content: { PlaylistDetailView(detail: $0) }
     }
 }
 

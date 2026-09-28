@@ -221,7 +221,22 @@ playlistPanelVideoWrapperRenderer
 - 믹스 저장: `playlistEditEndpoint{playlistId, actions[ACTION_SET_EPHEMERAL_STATUS isEphemeral]}`.
 - 곡 보관함 저장·다시 듣기 고정: toggle `BOOKMARK_BORDER`/`KEEP`, 양방향 `feedbackEndpoint.feedbackToken`(응답마다 다름 → 최신 응답에서만 사용).
 - 구독: `subscribeButtonRenderer{subscribed, channelId, serviceEndpoints[subscribeEndpoint{channelIds, params}, signalServiceEndpoint → confirmDialog → unsubscribeEndpoint{channelIds}]}`.
-- HTTP 경로(`like/like`, `like/removelike`, `feedback`, `subscription/subscribe|unsubscribe`, `browse/edit_playlist`)는 [가설, 미관찰] — A8에서 한 항목씩 원상태 기록 → 실행 → 확인 → 되돌림으로 검증 예정.
+- HTTP 경로(`like/like`, `like/removelike`, `feedback`, `subscription/subscribe|unsubscribe`, `browse/edit_playlist`)는 [가설, 미관찰] — A8에서 한 항목씩 원상태 기록 → 실행 → 확인 → 되돌림으로 검증 예정. (`like/*`, `feedback`은 A8.1에서 확인)
+
+#### A8 Write Actions — 공통 구조
+- Domain: `LibraryEdit`(각 case는 정확한 역연산이 있는 action만) → `MusicCatalog.apply(_:) -> Set<CatalogScope>`. 반환값은 **서비스가 판단한 영향 범위**(`.playlist(id)`, `.library` = 보관함 root·카테고리·보관함 검색). `CatalogChanges`(MainActor, scope별 revision)가 성공한 write의 scope만 올림.
+- 캐시를 가진 화면은 자기 scope revision이 바뀌면 **제자리 재로드**(실패 시 기존 내용 유지): `CatalogPage(scope:)`(재생목록 `.playlist(id)`, 보관함 카테고리 `.library`), `LibraryView`(`.library`), 보관함 scope 검색(request key에 revision). Home은 좋아요에 영향 없음 → 대상 아님.
+- 요청 body는 id만(토큰 저장·재사용 없음). 토큰이 필요한 action(feedback)은 실행 직전 최신 응답에서 가져오는 구조로 추가 예정.
+- 검증 도구: probe `raw`로 action 전후 상태(`/next` likeStatus, VLLM 첫 page·곡 수, `FEmusic_liked_videos` 첫 page, 보관함 검색)를 저장·비교(scratchpad `a8/state.sh`, 저장소 밖).
+
+#### A8.1 곡 좋아요 / 취소 [확인, 실제 계정 + Simulator live/replay/mock, 원상복구 확인]
+- 경로 [확인]: `like/like` / `like/removelike`, body `{target:{videoId}}`(`likeParams` 없이도 200). 응답 = toast action만(`좋아요 표시한 음악에 저장되었습니다.` / `…에서 삭제되었습니다.`), `logged_in=1`.
+- probe 검증(보라빛 밤 `wh7j1uEpNsQ`, ATV): 원상태 INDIFFERENT·좋아요 1,111곡·보관함 노래/검색 없음 → like: LIKE, VLLM 첫 항목, 1,112곡, **보관함 노래 첫 항목·보관함 검색에도 추가** → removelike: INDIFFERENT, 1,111곡, 보관함 검색 없음, 그러나 **보관함 노래(`FEmusic_liked_videos`)에는 남음**(1분 후에도). web client의 INDIFFERENT endpoint에도 보관함 제거 action이 없음 → 서비스 동작 [확인]. 원상복구를 위해 최신 `FEmusic_liked_videos` 응답의 해당 행 `보관함에서 삭제` feedback token으로 `feedback {feedbackTokens:[…]}` 1회(응답 `isProcessed: true`, toast `보관함에서 삭제되었습니다.`) → 보관함 노래 첫 page·VLLM 첫 page가 **원 응답과 id 순서까지 동일**.
+  - 참고: 원래 보관함 노래 첫 page 25곡 중 좋아요에 없는 1곡(うそのお言葉)도 같은 잔여물일 가능성 [가설]. 보관함 노래 행 메뉴의 `보관함에 저장` toggle은 좋아요로 들어온 곡에서도 기본값 "저장"(= 명시 저장 아님)이라 보관함 포함 여부 판정에 쓸 수 없음.
+- 앱: Full Player의 별(즐겨찾기) = 서비스 좋아요. 초기 상태는 `/next` 대기열 행 메뉴 toggle(`UNFAVORITE` = 현재 좋아요)로 `QueueVariant.isLiked`에 기록(counterpart 포함). 탭 → 즉시 반영 → 실패 시 되돌림(+ `Player` 로그), 진행 중 재탭 무시, 진행 중인 id는 queue page가 덮어쓰지 않음. live unlike는 web과 같이 `removelike`만(보관함 노래 잔여는 서비스 동작 그대로 둠).
+- Simulator live(지구가 태양을 네 번 (Live) `UCQHgJ4uRwo`, UGC 영상): 원상태 INDIFFERENT·1,111곡 → 별 탭 → `like/like` 1회, 별 채움, 서버 LIKE·VLLM 첫 항목·1,112곡(이 영상은 보관함 노래에 **추가되지 않음** — ATV와 다름) → 좋아요 표시한 음악 페이지 첫 행 + 행 별 표시 → 그 페이지를 연 채 Full Player에서 별 해제 → `like/removelike` 1회 + 열린 VLLM 페이지 `browse` 재로드 1회, 목록에서 즉시 사라짐 → 서버 INDIFFERENT·1,111곡, VLLM·보관함 노래 첫 page가 원 응답과 동일.
+- replay: write 녹화 없음 → `notRecorded` → 별 즉시 되돌림, 로그 `like write failed, reverted`. Mock: 별 토글 유지(세션 한정), 요청 없음.
+- 미확인: 오류 시 사용자에게 보이는 문구 없음(되돌림만) — 필요 여부는 UI 결정. 행 메뉴에서의 좋아요(SongRow 메뉴)는 기존 UI에 항목이 없어 미연결.
 
 #### 남은 작업 (2026-09-28)
 1. (완료) 보관함 검색 → 서버 보관함 탭(A6.7).

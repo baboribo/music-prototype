@@ -132,6 +132,18 @@ struct LiveMusicCatalog: MusicCatalog {
         return page
     }
 
+    /// Writes send only ids (no stored tokens). Verified on the account, 2026-09-29:
+    /// `like/like` also adds the song to the library's songs; `like/removelike`
+    /// (like the web client) leaves it there.
+    func apply(_ edit: LibraryEdit) async throws -> Set<CatalogScope> {
+        switch edit {
+        case .like(let videoID, let liked):
+            _ = try await client.post(liked ? "like/like" : "like/removelike",
+                                      body: ["target": .object(["videoId": .string(videoID)])])
+            return [.playlist("VLLM"), .library]
+        }
+    }
+
     func artist(_ id: Artist.ID) async throws -> ArtistDetail {
         guard let detail = ArtistParsing.detail(try await client.post("browse", body: ["browseId": .string(id)]), id: id) else {
             throw CatalogError.unexpectedResponse
@@ -155,6 +167,7 @@ private struct FailingCatalog: MusicCatalog {
     func libraryPage(_ continuation: CatalogContinuation) async throws -> LibraryPage { throw error }
     func queue(_ seed: QueueSeed) async throws -> QueuePage { throw error }
     func queuePage(_ continuation: CatalogContinuation) async throws -> QueuePage { throw error }
+    func apply(_ edit: LibraryEdit) async throws -> Set<CatalogScope> { throw error }
 }
 
 enum SearchParsing {
@@ -475,7 +488,11 @@ enum QueueParsing {
             duration: ItemParsing.seconds(renderer["lengthText"]?.text).map(Double.init),
             isExplicit: renderer.all("iconType").contains { $0.string == "MUSIC_EXPLICIT_BADGE" },
             isPlayable: renderer["unplayableText"] == nil)
-        return QueueVariant(track: track, kind: kind)
+        // The row menu's like toggle shows the action it would take: UNFAVORITE = liked now.
+        let likeIcon = (renderer.at("menu.menuRenderer.items")?.array ?? [])
+            .compactMap { $0.at("toggleMenuServiceItemRenderer.defaultIcon.iconType")?.string }
+            .first { $0 == "FAVORITE" || $0 == "UNFAVORITE" }
+        return QueueVariant(track: track, kind: kind, isLiked: likeIcon.map { $0 == "UNFAVORITE" })
     }
 
     private static func segmentMap(_ node: JSON) -> SegmentMap? {

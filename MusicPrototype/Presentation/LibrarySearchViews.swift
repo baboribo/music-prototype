@@ -6,8 +6,10 @@ import SwiftUI
 /// then a 2-column grid. Entries are YouTube Music's library (pins, recent activity).
 struct LibraryView: View {
     @Environment(\.musicCatalog) private var catalog
+    @Environment(CatalogChanges.self) private var changes
     @State private var phase: Phase = .loading
     @State private var attempt = 0
+    @State private var loadedRevision = 0
     private let pinnedColumns = Array(repeating: GridItem(.flexible(), spacing: 12, alignment: .top), count: 3)
     private let recentColumns = Array(repeating: GridItem(.flexible(), spacing: 13, alignment: .top), count: 2)
 
@@ -37,17 +39,29 @@ struct LibraryView: View {
         .navigationTitle("Library")
         .toolbarTitleDisplayMode(.inlineLarge)
         .task(id: attempt) { await load() }
+        .task(id: changes.revision(.library)) { await reloadIfChanged() }
     }
 
     /// First appearance and retry only; switching tabs keeps what's loaded.
     private func load() async {
         guard case .loading = phase else { return }
+        let revision = changes.revision(.library)
         do {
             phase = .loaded(try await catalog.library())
+            loadedRevision = revision
         } catch {
             guard !Task.isCancelled else { return }
             phase = .failed(error.localizedDescription)
         }
+    }
+
+    /// After a write changed the library: replace in place, keep the shown feed on failure.
+    private func reloadIfChanged() async {
+        let revision = changes.revision(.library)
+        guard case .loaded = phase, revision != loadedRevision,
+              let feed = try? await catalog.library(), !Task.isCancelled else { return }
+        phase = .loaded(feed)
+        loadedRevision = revision
     }
 
     private func content(_ feed: LibraryFeed) -> some View {
@@ -147,7 +161,7 @@ struct LibraryCategoryView: View {
     var body: some View {
         Group {
             if category == .artists {
-                CatalogPage { [catalog, artistScope] in try await catalog.libraryArtists(artistScope) } content: { page in
+                CatalogPage(scope: .library) { [catalog, artistScope] in try await catalog.libraryArtists(artistScope) } content: { page in
                     LibraryCategoryList(category: category, first: page)
                 }
                 .id(artistScope)
@@ -161,7 +175,7 @@ struct LibraryCategoryView: View {
                     .accessibilityIdentifier("library.artists.scope")
                 }
             } else {
-                CatalogPage { [catalog, category] in try await catalog.library(category) } content: { page in
+                CatalogPage(scope: .library) { [catalog, category] in try await catalog.library(category) } content: { page in
                     LibraryCategoryList(category: category, first: page)
                 }
             }
@@ -344,6 +358,7 @@ struct SearchView: View {
     @Environment(MockPlayer.self) private var player
     @Environment(SearchHistory.self) private var history
     @Environment(\.musicCatalog) private var catalog
+    @Environment(CatalogChanges.self) private var changes
     let query: String
     let scope: SearchScope
     @State private var filter: SearchFilter = .top
@@ -365,6 +380,8 @@ struct SearchView: View {
         let filter: SearchFilter
         let scope: SearchScope
         let attempt: Int
+        /// Library results are stale after a write to the library.
+        let libraryRevision: Int
     }
 
     private var normalizedQuery: String { query.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -421,7 +438,8 @@ struct SearchView: View {
     }
 
     private var requestKey: RequestKey {
-        RequestKey(query: normalizedQuery, filter: filter, scope: scope, attempt: attempt)
+        RequestKey(query: normalizedQuery, filter: filter, scope: scope, attempt: attempt,
+                   libraryRevision: scope == .library ? changes.revision(.library) : 0)
     }
 
     /// Debounced: typing cancels the previous task before its request goes out.
