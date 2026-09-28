@@ -211,8 +211,9 @@ playlistPanelVideoWrapperRenderer
 - Unplayable: `unplayableText`("[거주 국가에서 차단된 동영상]", title 없음)는 **anonymous 응답에서만 관찰**. 로그인 세션에서는 같은 항목이 재생 가능했고, 보관함에서 GREY_OUT인 곡(A5)은 `/next` 대기열에서 **아예 빠짐**(4 page 확인). 모델·UI(흐림, 선택 불가, next/previous 건너뜀)는 구현했지만 live 화면에서 unplayable 대기열 항목은 **미확인**.
 - Player 상태(`MockPlayer`, 이름 유지): 선택 즉시 탭한 곡 표시 → 서버 queue 도착 시 교체(서버 `selected` 항목, 재생 불가면 첫 재생 가능 항목, 전부 불가면 탭한 곡 유지 + 뒤에 표시). 새 요청이 이전 요청 결과를 덮지 않음(task cancel). shuffle/reorder는 `QueueItem` 단위(원래 서버 순서 보존), continuation은 목록 끝 도달 또는 next로 남은 항목 <5일 때 1회, id로 중복 제거. 곡 전환 버튼 = counterpart 있는 항목에서만 활성, 위치는 `SegmentMap`으로 변환(오디오 없음). 비활성 queue 옵션을 흐리게 표시(기존에는 비활성도 활성처럼 보였음).
 - 확인: live 검색 → Celebrity 믹스(서버 대기열·출처·길이 3:16), 0:59에서 곡 전환 → 영상 1:01/3:18(segmentMap +2.237 s와 일치) → 되돌림 0:59; 대기열 항목 선택; 아티스트 재생 → 서버 `RDEM` 믹스(첫 곡 마음); 대기열 끝 스크롤 → continuation 요청 1회; Full Player 닫기 → Mini Next → 다시 열기 시 현재 곡·Queue 모드·출처·순서 유지; replay에서 anonymous 응답 → 대기열 오류·다시 시도, 탭한 곡 유지·Next 비활성; Mock 대기열 동일.
-- **미검증** (5시간 사용량 80%에서 검증 중단, 2026-09-28): live 앨범/재생목록에서 시작한 대기열의 화면(시작 곡 = 서버 `selected`, probe로 요청·응답만 확인), 대기열 reorder/shuffle과 서버 대기열 조합, 곡 전환 후 next/previous, unplayable 항목 화면, 오류 후 다시 시도 성공 경로(live).
-- 남음(미구현): 앨범 끝 automix, 대기열 저장·재시작 복원(현재 앱 재시작 시 초기화), native player가 `QueueItem`(primary/counterpart/segmentMap)을 직접 소비하도록 연결(B축 결과 이후).
+- **추가 검증 (2026-09-29)** [확인, Simulator]: live 앨범(Palette) 8번 곡 탭 → `next` 1회, 서버 `selected` = 밤편지, 다음 9–10번, 출처 Palette; 곡 전환 0:00 → 영상 0:24(segmentMap +24.013 s) → Next = 그렇게 사랑은(0:00, 곡 전환 비활성) → Previous = 밤편지 노래(영상 상태 해제); live 재생목록(보카로인 곡들 모아둠) 3번 곡 → 서버 대기열·출처; 셔플 on → 순서 변경, off → 서버 순서 그대로 복원; 첫 항목을 드래그해 3번째로 이동 → Next가 바뀐 순서를 따름; replay에서 대기열 파일 없음 → 오류 행 → 파일 복구 후 다시 시도 → 대기열 로드·오류 행 사라짐.
+- **미검증 유지**: unplayable 대기열 항목 화면(로그인 응답에서 재현 불가). 오류 문구가 replay에서는 시스템 파일 오류 원문(영어)으로 보임 — live 오류는 `CatalogError` 문구.
+- 보류(미구현, blocker 아님): 앨범 끝 automix, 대기열 저장·재시작 복원(현재 앱 재시작 시 초기화). native player가 `QueueItem`(primary/counterpart/segmentMap)을 직접 소비하도록 연결(B축 결과 이후).
 
 #### 남은 작업 (2026-09-28)
 1. (완료) 보관함 검색 → 서버 보관함 탭(A6.7).
