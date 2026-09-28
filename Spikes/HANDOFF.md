@@ -253,6 +253,17 @@ playlistPanelVideoWrapperRenderer
 - probe 원상태: toggle off, 보관함 재생목록 첫 page(26)·landing에 없음 → 앱 + 탭: `like/like` 1회, ✓, 서버 toggle on·재생목록 목록 3번째·landing 2번째 → ✓ 탭: `like/removelike` 1회, +, 서버 toggle off·**재생목록 첫 page와 landing 모두 원 응답과 동일**.
 - 내 재생목록은 기존대로 다운로드 자리(저장 버튼 없음, `membership` nil).
 
+#### A8.4 아티스트 구독 / 취소 — probe만, **앱 연결 보류(attestation)** [확인, 원상복구 확인]
+- header `subscribeButtonRenderer{subscribed, channelId, serviceEndpoints[subscribeEndpoint{channelIds, params}, signalServiceEndpoint→확인 dialog→unsubscribeEndpoint]}`. `channelId`는 **YouTube 채널**(아이유: 아티스트 페이지 `UCTUR0…`와 다른 `UC3SyT4…` = "이지금 [IU Official]") → YTM 구독 = YouTube 채널 구독.
+- probe: 원상태 `subscribed:false`, 구독 아티스트 3명 → `subscription/subscribe {channelIds}`(params 없이) HTTP 200, toast "이지금 [IU Official] 채널을 구독합니다.", 알림 상태 entity `SUBSCRIPTION_NOTIFICATION_STATE_OFF` → 직후 읽기는 아직 이전 상태, 재조회 시 `subscribed:true`·구독 아티스트 4명(아이유 선두) → `subscription/unsubscribe {channelIds}` 200 → `subscribed:false`, 구독 아티스트 목록이 원 응답과 동일.
+- **구독 응답에만 `runAttestationCommand{engagementType: ENGAGEMENT_TYPE_SUBSCRIBE, ids:[externalChannelId]}`** 포함(좋아요·저장·해제·feedback·구독 취소 응답에는 없음). web client는 이때 BotGuard 계열 attestation을 실행하는 것으로 보임 [가설]. 이번 probe는 attestation을 실행하지 않았고 서버는 구독을 적용했다. 즉 1회 attestation 없는 구독 이벤트가 계정에 기록됨.
+- 판단: attestation을 실행하거나 생략하는 구현은 합의된 "보호/anti-abuse 계층" 범위 → **앱 연결은 보류하고 사용자 결정 대기**. 선택지: (a) 구독 기능 제외(아티스트 ☆는 현재처럼 세션 표시 또는 숨김), (b) attestation 없이 요청(서버가 현재는 수용하지만 계정 신호·정책 위험, 향후 거부 가능), (c) in-app 인증(WKWebView)과 함께 공식 web의 구독 흐름을 페이지 안에서 수행하는 방식 검토(2단계 인증 조사와 묶음). 아티스트 ☆는 여전히 로컬 세션 상태.
+
+#### A8 남은 항목 (사용자 결정 필요)
+- 곡 보관함 저장/삭제, 다시 듣기 고정/해제: `feedbackEndpoint` token 방식(최신 응답의 token). 현재 UI에 **진입점이 없음**(곡 행 `…` 메뉴에 해당 항목 없음, pin 표시만 있음) → 메뉴 항목 추가 위치 결정 필요.
+- 믹스 저장/해제(`playlistEditEndpoint ACTION_SET_EPHEMERAL_STATUS`): 믹스 페이지 header 버튼 형태 확인 후 `LibrarySaveButton` 재사용 가능성 [미확인].
+- 좋아요 목록에서 곡 제거 = unlike와 동일(A8.1 경로).
+
 #### 남은 작업 (2026-09-28)
 1. (완료) 보관함 검색 → 서버 보관함 탭(A6.7).
 1a. (완료) 보관함 고정 판정 → 메뉴 toggle 기준(A6.6). pin/unpin 전후 관찰은 보류.
@@ -261,7 +272,7 @@ playlistPanelVideoWrapperRenderer
 3. 쓰기 동작 미구현 — A6.5-4 inventory 기준으로 범위 결정 필요(재생목록 삭제·추천 안 함은 비가역).
 4. B2 실험(sig/n만 적용 시 200 여부) — 사용자 승인 대기.
 5. (완료) A7 checkpoint commit.
-6. 다음(사용자 지시 후 시작): A8 Write Actions(사전 조사 메모 참고) → 앱 내부 인증/session 조사 → B2 Playback feasibility spike(승인됨, 별도 spike).
+6. A8 진행 중: 좋아요(A8.1)·앨범 저장(A8.2)·재생목록 저장(A8.3) 완료, 구독(A8.4) attestation으로 보류, 곡 보관함·고정·믹스 저장은 UI 진입점 결정 대기. 이후 앱 내부 인증/session 조사 → B2 Playback feasibility spike(승인됨, 별도 spike).
 
 ### B. Native playback spike (본 앱과 분리)
 조사 [가설 — 외부 자료, 이 환경 미검증]:
