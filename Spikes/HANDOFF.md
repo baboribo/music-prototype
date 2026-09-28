@@ -215,6 +215,14 @@ playlistPanelVideoWrapperRenderer
 - **미검증 유지**: unplayable 대기열 항목 화면(로그인 응답에서 재현 불가). 오류 문구가 replay에서는 시스템 파일 오류 원문(영어)으로 보임 — live 오류는 `CatalogError` 문구.
 - 보류(미구현, blocker 아님): 앨범 끝 automix, 대기열 저장·재시작 복원(현재 앱 재시작 시 초기화). native player가 `QueueItem`(primary/counterpart/segmentMap)을 직접 소비하도록 연결(B축 결과 이후).
 
+#### A8 사전 조사 메모 (2026-09-29, 코드 변경·쓰기 요청 없음, 저장 응답에서 형태만 확인)
+- 곡 좋아요: 메뉴 toggle `FAVORITE`/`UNFAVORITE`, `likeEndpoint{status LIKE|INDIFFERENT, target.videoId, likeParams|removeLikeParams}`. `/next`의 `likeButtonRenderer{likeStatus}`에 현재 상태, LIKE 시 `musicLibraryStatusUpdateCommand`(보관함 추가 feedback token) 동반.
+- 앨범/재생목록 저장: header `toggleButtonRenderer{isToggled, defaultIcon BOOKMARK_BORDER, default/toggled likeEndpoint target.playlistId}`.
+- 믹스 저장: `playlistEditEndpoint{playlistId, actions[ACTION_SET_EPHEMERAL_STATUS isEphemeral]}`.
+- 곡 보관함 저장·다시 듣기 고정: toggle `BOOKMARK_BORDER`/`KEEP`, 양방향 `feedbackEndpoint.feedbackToken`(응답마다 다름 → 최신 응답에서만 사용).
+- 구독: `subscribeButtonRenderer{subscribed, channelId, serviceEndpoints[subscribeEndpoint{channelIds, params}, signalServiceEndpoint → confirmDialog → unsubscribeEndpoint{channelIds}]}`.
+- HTTP 경로(`like/like`, `like/removelike`, `feedback`, `subscription/subscribe|unsubscribe`, `browse/edit_playlist`)는 [가설, 미관찰] — A8에서 한 항목씩 원상태 기록 → 실행 → 확인 → 되돌림으로 검증 예정.
+
 #### 남은 작업 (2026-09-28)
 1. (완료) 보관함 검색 → 서버 보관함 탭(A6.7).
 1a. (완료) 보관함 고정 판정 → 메뉴 toggle 기준(A6.6). pin/unpin 전후 관찰은 보류.
@@ -223,7 +231,7 @@ playlistPanelVideoWrapperRenderer
 3. 쓰기 동작 미구현 — A6.5-4 inventory 기준으로 범위 결정 필요(재생목록 삭제·추천 안 함은 비가역).
 4. B2 실험(sig/n만 적용 시 200 여부) — 사용자 승인 대기.
 5. (완료) A7 checkpoint commit.
-6. 다음 후보(사용자 결정 전 시작 금지): A8 Write Actions, B2 Playback 실험.
+6. 다음(사용자 지시 후 시작): A8 Write Actions(사전 조사 메모 참고) → 앱 내부 인증/session 조사 → B2 Playback feasibility spike(승인됨, 별도 spike).
 
 ### B. Native playback spike (본 앱과 분리)
 조사 [가설 — 외부 자료, 이 환경 미검증]:
