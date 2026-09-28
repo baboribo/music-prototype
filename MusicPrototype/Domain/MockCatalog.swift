@@ -162,16 +162,29 @@ enum LibraryCategory: String, CaseIterable, Hashable, Sendable {
     }
 }
 
+/// A tile in the 3×3 빠른 선곡 grid: YouTube Music's listen-again module, where
+/// "다시 듣기에 고정" items come first. Any item kind can be pinned.
 enum QuickPick: Identifiable, Hashable, Sendable {
-    case track(Track)
+    case track(Track, pinned: Bool = false)
     case playlist(Playlist, pinned: Bool)
     case release(Release, pinned: Bool)
+    case artist(Artist, pinned: Bool)
 
     var id: String {
         switch self {
-        case .track(let v): "track.\(v.id)"
+        case .track(let v, _): "track.\(v.id)"
         case .playlist(let v, _): "playlist.\(v.id)"
         case .release(let v, _): "release.\(v.id)"
+        case .artist(let v, _): "artist.\(v.id)"
+        }
+    }
+
+    init(_ item: BrowseItem, pinned: Bool) {
+        switch item {
+        case .track(let v): self = .track(v, pinned: pinned)
+        case .playlist(let v): self = .playlist(v, pinned: pinned)
+        case .release(let v): self = .release(v, pinned: pinned)
+        case .artist(let v): self = .artist(v, pinned: pinned)
         }
     }
 }

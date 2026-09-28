@@ -137,9 +137,15 @@ enum ItemParsing {
         return nil
     }
 
-    /// The listener pinned it in the library ("고정됨" badge).
+    /// Pinned with "다시 듣기에 고정". The menu toggle is authoritative: it offers
+    /// `KEEP_OFF` (unpin) when pinned. The "고정됨" badge is missing on some pinned
+    /// library items, so it's only a fallback when the menu has no toggle.
     static func isPinned(_ node: JSON) -> Bool {
-        node["subtitleBadges"]?.all("iconType").contains { $0.string == "KEEP" } ?? false
+        let toggles = (node.at("menu.menuRenderer.items")?.array ?? []).compactMap { $0["toggleMenuServiceItemRenderer"] }
+        if let icon = toggles.lazy.compactMap({ $0.at("defaultIcon.iconType")?.string }).first(where: { $0 == "KEEP" || $0 == "KEEP_OFF" }) {
+            return icon == "KEEP_OFF"
+        }
+        return node["subtitleBadges"]?.all("iconType").contains { $0.string == "KEEP" } ?? false
     }
 
     private static func pageType(_ endpoint: JSON?) -> String? {

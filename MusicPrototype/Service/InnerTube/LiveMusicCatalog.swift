@@ -140,8 +140,9 @@ enum SearchParsing {
 }
 
 enum HomeParsing {
-    /// The localized title is the only marker the web response gives 빠른 선곡.
-    private static let quickPicksTitles: Set<String> = ["빠른 선곡", "Quick picks"]
+    /// Titles follow the iOS app, which shows both modules below as 빠른 선곡
+    /// (the web client calls the first one 다시 듣기).
+    static let quickPicksTitle = "빠른 선곡"
 
     static func feed(_ shelves: [JSON]) -> HomeFeed {
         var sections: [HomeSection] = []
@@ -150,15 +151,21 @@ enum HomeParsing {
             let title = shelf.at("header.musicCarouselShelfBasicHeaderRenderer.title")?.text ?? ""
             let contents = shelf["contents"]?.array ?? []
             let id = "\(index).\(title)"
-            if contents.contains(where: { $0["musicResponsiveListItemRenderer"] != nil }) {
+            if isListenAgain(shelf) {
+                // The 3×3 grid, first on Home (H1); pinned items already lead.
+                let picks = contents.compactMap { node -> QuickPick? in
+                    guard let card = node["musicTwoRowItemRenderer"], let item = ItemParsing.card(card) else { return nil }
+                    return QuickPick(item, pinned: ItemParsing.isPinned(card))
+                }
+                guard !picks.isEmpty else { continue }
+                sections.insert(HomeSection(id: id, title: quickPicksTitle, content: .quickPicks(picks)), at: 0)
+            } else if contents.contains(where: { $0["musicResponsiveListItemRenderer"] != nil }) {
                 let tracks = contents.compactMap { $0["musicResponsiveListItemRenderer"].flatMap(ItemParsing.track) }
                 guard !tracks.isEmpty else { continue }
-                if quickPicksTitles.contains(title) {
-                    sections.insert(HomeSection(id: id, title: title, content: .quickPicks(tracks.map(QuickPick.track))), at: 0)
-                } else {
-                    let rows = shelf["numItemsPerColumn"]?.string.flatMap(Int.init) ?? shelf["numItemsPerColumn"]?.number.map(Int.init)
-                    sections.append(HomeSection(id: id, title: title, content: .songs(tracks, rowsPerPage: rows ?? 4)))
-                }
+                let rows = shelf["numItemsPerColumn"]?.string.flatMap(Int.init) ?? shelf["numItemsPerColumn"]?.number.map(Int.init)
+                // Song 빠른 선곡 stays where the server puts it, as a row-based shelf.
+                sections.append(HomeSection(id: id, title: isSongQuickPicks(shelf) ? quickPicksTitle : title,
+                                            content: .songs(tracks, rowsPerPage: rows ?? 4)))
             } else {
                 let items = contents.compactMap { $0["musicTwoRowItemRenderer"].flatMap(ItemParsing.card) }
                 guard !items.isEmpty else { continue }
@@ -166,6 +173,27 @@ enum HomeParsing {
             }
         }
         return HomeFeed(sections: sections)
+    }
+
+    /// The listen-again module: its "more" button browses `FEmusic_listen_again`.
+    static func isListenAgain(_ shelf: JSON) -> Bool {
+        shelf.at("header.musicCarouselShelfBasicHeaderRenderer.moreContentButton.buttonRenderer.navigationEndpoint.browseEndpoint.browseId")?.string
+            == "FEmusic_listen_again"
+    }
+
+    /// Song 빠른 선곡: a paged row shelf with a play-all button whose every item starts
+    /// that song's radio (`RDAMVM<videoId>`). "Shorts에서 들은 음악" has the same shape
+    /// but plays bare videos.
+    static func isSongQuickPicks(_ shelf: JSON) -> Bool {
+        guard shelf["numItemsPerColumn"] != nil,
+              shelf.at("header.musicCarouselShelfBasicHeaderRenderer.moreContentButton.buttonRenderer.navigationEndpoint.watchEndpoint") != nil
+        else { return false }
+        let rows = (shelf["contents"]?.array ?? []).compactMap { $0["musicResponsiveListItemRenderer"] }
+        return !rows.isEmpty && rows.allSatisfy { row in
+            let watch = row.at("overlay.musicItemThumbnailOverlayRenderer.content.musicPlayButtonRenderer.playNavigationEndpoint.watchEndpoint")
+            guard let videoID = watch?["videoId"]?.string else { return false }
+            return watch?["playlistId"]?.string == "RDAMVM" + videoID
+        }
     }
 }
 

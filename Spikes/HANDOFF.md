@@ -137,10 +137,72 @@ playlistPanelVideoWrapperRenderer
   - 확인: 루트(고정·최근 활동), 재생목록(스크롤로 continuation, 중복 없음), 노래, 앨범(1), 아티스트→아티스트 페이지, 내 재생목록(보카로인 곡들 모아둠, [?]?), 남의 재생목록(ASMR, 저장 버튼), 요청 수(Home 5 + 보관함 1 + 재생목록 1, 불필요 요청 없음), Mock Library 동일, replay 미녹화 시 오류 상태.
   - 미반영: 정렬(서버 header의 정렬 메뉴: 최근 활동/최근에 저장됨/최근 재생), 보관함 검색 scope(여전히 로컬 fixture 필터), 고정/저장/좋아요 등 쓰기 동작(요청 없음, 기존 세션 상태 UI 유지).
 
+#### A6.5 Library semantics audit (조사만, 코드 변경 없음)
+**1. 보관함 검색** [확인, live]
+- 서버 endpoint 있음: 검색 응답의 `tabbedSearchResultsRenderer.tabs`에 `YT Music` / `보관함`(`searchEndpoint.params = agIYBA==`) / `업로드`(`agIYAw==`) 탭이 서버에서 온다. 보관함 탭 결과는 `musicShelfRenderer`로 아티스트·앨범·노래·재생목록 shelf, 결과에 따라 chip(아티스트 `EgWKAQIgAWoIEAUQCRADGAQ=`, 앨범 `…IYAWoI…`, 노래 `…IIAWoI…`)이 붙는다. 결과 없음은 `messageRenderer`("검색결과가 없습니다.").
+- 범위 검증: 보관함 아티스트(Radwimps, `MUSIC_PAGE_TYPE_LIBRARY_ARTIST`), 저장 앨범(君のように生きれたら), 보관함 노래(Lovebird), **내가 만든 재생목록**(보카로인 곡들 모아둠) → 찾음. **남이 만든 저장 재생목록**(ASMR)과 그 안에만 있는 곡(Motteke) → **없음**.
+- 판단: 최종 경로로 사용 가능(서버가 공식 web client와 같은 보관함 검색을 수행, 로드된 page 필터링 불필요). 단 "보관함 화면에 보이는 모든 것"과 범위가 다름(저장한 남의 재생목록 제외) — UI 문구/기대치에 반영 필요. params는 `SearchParsing`에 하드코딩하지 말고 응답의 탭 endpoint 값을 쓰는 편이 안전.
+
+**2. Pin 의미** [확인, live + 저장 응답]
+- 응답에 존재하는 pin은 하나: **"다시 듣기에 고정 / 다시 듣기에서 고정 해제"** (`toggleMenuServiceItemRenderer`, icon `KEEP`/`KEEP_OFF`, 양방향 모두 `feedbackEndpoint.feedbackToken`). 재생목록/앨범/아티스트/노래 카드 메뉴와 재생목록 header에 공통.
+- **"빠른 선곡에 고정" action은 어떤 응답에도 없음.** Home 빠른 선곡 항목 메뉴에도 없음 → 기존 mock의 `QuickPick(pinned:)` 개념은 서버 근거 없음.
+- 상태 판별: 메뉴 toggle의 기본 icon이 `KEEP_OFF`면 현재 고정됨. Home 다시 듣기와 보관함 메뉴는 같은 항목에 대해 일치(3개: 좋아요 표시한 음악, 몽환적인 일본 인디 락 믹스, たま★ふぁんこっと).
+- **`subtitleBadges`의 `고정됨` badge는 불완전**: 보관함 landing에서 고정 3개 중 좋아요 표시한 음악에만 badge, 몽환적인 믹스는 메뉴상 고정인데 badge 없음. Home 다시 듣기에서는 3개 모두 badge. → A6 parser(badge 기준 pinned 분리)는 과소 판정. 메뉴 toggle 상태를 기준으로 바꿔야 함 [미수정].
+- feedbackToken은 응답마다 값이 다름(같은 항목 다른 hash) → 캐시·재사용 금지, 최신 응답의 token만 사용.
+- 보관함 landing에서 고정 항목이 앞에 오지 않음(몽환적인 믹스 13번째) → "보관함 상단 고정 그리드"는 서버 정렬 개념이 아님. 현재 UI의 pinned 그리드를 "다시 듣기 고정" 항목으로 채울지 결정 필요.
+- 미확정 [가설]: badge가 좋아요에만 붙는 이유(기본 고정 표시?). 공식 앱에서 항목 하나를 pin/unpin 후 landing/home을 다시 받아 badge·메뉴·순서 변화를 비교하면 확정 가능(사용자 협조 필요, 요청 기록은 redacted로).
+
+**3. 아티스트 vs 구독 아티스트** [확인, live]
+- 현재 `아티스트` 카테고리(`FEmusic_library_corpus_track_artists`) = **보관함 노래의 아티스트**: 442명(10 page, 중복 0), 부제 "N곡", id `MPLA<채널ID>`, 해당 페이지(`MPLA…` browse)는 `musicHeaderRenderer` + 보관함에 있는 그 아티스트 곡 목록(Radwimps 28곡).
+- 구독 아티스트(`FEmusic_library_corpus_artists`) = 구독 채널: 3명, 부제 "구독자 N명", id `UC…`, `MUSIC_PAGE_TYPE_ARTIST`.
+- 겹침 1명, 구독만 2명(보관함 곡 없음). 다른 개념. 합치면 "N곡"과 "구독자" 메타가 섞이고 탭 시 목적지(보관함 곡 목록 vs 아티스트 페이지)가 다름. 현재 앱은 `MPLA`→채널 아티스트 페이지로 이동(보관함 곡 목록 페이지는 미사용). UI 결정 대기.
+- 참고: 노래 카테고리(`FEmusic_liked_videos`)는 좋아요 목록과 대부분 겹치지만 동일하지 않음(첫 25곡 중 24곡이 좋아요 첫 100곡에 포함) → "보관함 노래 = 좋아요 + 보관함에 저장한 곡" [가설].
+
+**4. Write action inventory** [확인: 응답의 endpoint 형태 / 가설: 실제 HTTP 경로는 외부 참고(ytmusicapi), 미관찰]
+| action | 응답 표현 | 되돌리기 | 성공 후 무효화 |
+|---|---|---|---|
+| 곡 좋아요 / 취소 | `likeEndpoint{status LIKE/INDIFFERENT, target.videoId}` (메뉴 toggle, `likeButtonRenderer.serviceEndpoints`) | 가능 | 좋아요 재생목록(VLLM), 보관함 노래, 해당 행 상태 |
+| 재생목록/앨범 보관함 저장 / 해제 | `likeEndpoint{LIKE/INDIFFERENT, target.playlistId}` (메뉴 "보관함에 재생목록/앨범 저장", 재생목록 header toggle) | 가능 | 보관함 landing·재생목록/앨범 카테고리·보관함 검색·header 버튼 |
+| 믹스 저장 | `playlistEditEndpoint ACTION_SET_EPHEMERAL_STATUS` (양방향) | 가능 | 보관함 재생목록 |
+| 곡 보관함에 저장 / 삭제 | `feedbackEndpoint` token 쌍 (노래 행 메뉴 "보관함에 저장") | 가능(토큰) | 보관함 노래·보관함 아티스트·보관함 검색 |
+| 다시 듣기 고정 / 해제 | `feedbackEndpoint` token 쌍 | 가능(토큰) | Home 다시 듣기, 보관함 landing |
+| 아티스트 구독 / 취소 | `subscribeEndpoint`/`unsubscribeEndpoint{channelIds}` (메뉴 toggle, `subscribeButtonRenderer.serviceEndpoints`) | 가능 | 구독 아티스트, 아티스트 header |
+| 재생목록에서 곡 삭제 | `playlistEditEndpoint ACTION_REMOVE_VIDEO` (내 재생목록), 좋아요 목록에서는 `likeEndpoint INDIFFERENT` | 부분적(다시 추가 필요, 위치 복원 불확실) | 해당 재생목록 |
+| 재생목록 삭제 | `confirmDialogEndpoint` → `deletePlaylistEndpoint` | **불가** | 보관함 전체 |
+| 관심 없음 / 추천 안 함 | `feedbackEndpoint` 단방향 | 불가(응답에 역방향 없음) | Home |
+| 새 재생목록 | `createPlaylistEndpoint` (보관함 재생목록 첫 항목) | 삭제로만 | 보관함 |
+- 공통: 토큰·target은 **최신 응답에서만** 취하고, 성공 응답 전에는 UI를 낙관적으로 바꾸더라도 실패 시 되돌리기 필요. 현재 UI의 쓰기 버튼(보관함 저장 +, 아티스트 ☆, 곡 즐겨찾기)은 로컬 세션 상태만 바꿈.
+
+#### A6.6 Home "빠른 선곡" semantic mapping [확인: WEB_REMIX 응답 구조 + 사용자 iOS 스크린샷 `references/screenshot/ytm-home-quick-picks.png`]
+제목이 아니라 구조로 비교(Home 5 page, 15 shelf):
+| | WEB_REMIX `다시 듣기` (위치 0) | WEB_REMIX `빠른 선곡` (위치 10) | iOS 첫 `빠른 선곡` (3×3) |
+|---|---|---|---|
+| renderer | `musicCarouselShelfRenderer`, `musicTwoRowItemRenderer` 20개 | 같은 carousel, `musicResponsiveListItemRenderer` 20개, `numItemsPerColumn` 4 | 3×3 페이지 그리드, 점 3개(≈20개) |
+| 항목 종류 | 혼합(재생목록 3, 곡 ATV 10, 동영상 UGC 7) | 곡만(ATV 17, OMV 3) | 혼합(믹스·재생목록·곡·동영상) |
+| header | 사용자 채널 thumbnail("채널로 이동", `USER_CHANNEL`), 더보기 → `browse FEmusic_listen_again`(페이지 제목 "다시 듣기", 46개 grid) | thumbnail 없음, 더보기 = "모두 재생" watch | 아바타 + chevron |
+| 고정 | 앞 3개가 `KEEP_OFF`(고정됨) + `고정됨` badge: 몽환적인 일본 인디 락 믹스, たま★ふぁんこっと, 좋아요 표시한 음악 | 없음 | 앞 3개에 pin 아이콘, **같은 3개·같은 순서**, 이어서 パスワードキーパー, [Adult Swim]…, Cheer squad… (web 목록과 일치) |
+
+결론:
+- **iOS 첫 `빠른 선곡`(3×3) = WEB_REMIX `다시 듣기` 모듈(`FEmusic_listen_again`)**. 같은 데이터에 client별로 다른 제목. iOS의 pin 아이콘 = "다시 듣기에 고정" 상태(`KEEP_OFF`). 이 모듈에서는 고정 항목이 앞에 온다.
+- **iOS 두 번째 `빠른 선곡`(그리드 아님) = WEB_REMIX `빠른 선곡`**(곡 목록, 4행 column, 모두 재생) [사용자 관찰 기준, 항목 대조는 미실시].
+- "다시 듣기에 고정/해제" toggle은 Home의 **모든** 카드/행에 붙어 있다(154개). 고정되면 이 모듈 앞쪽에 나타난다. 별도의 "빠른 선곡에 고정" action은 없다 — iOS의 "빠른 선곡 pin"과 이것이 같은 상태.
+- 보관함 `고정됨` badge는 같은 pin 상태의 불완전한 표시(A6.5-2).
+- 현재 앱 live Home은 **반대로 연결됨**: web `빠른 선곡`(곡 목록)을 3×3 그리드로 올리고, `다시 듣기`는 일반 카드 shelf로 표시. H1("빠른 선곡 우선")이 참고한 iOS 3×3는 실제로 listen-again 모듈이다.
+- 식별은 지역화 제목 대신 구조로: listen-again = 더보기 `browseId == FEmusic_listen_again`(비지역화), 곡 빠른 선곡 = list item + `numItemsPerColumn` + 모두 재생 watch(제목 fallback). [미수정 — 결정 대기]
+- **적용 (사용자 결정 반영)** [확인, Simulator live]:
+  - 3×3 그리드 = listen-again 모듈(식별: 더보기 `browseId == FEmusic_listen_again`). 혼합 항목(`QuickPick`에 artist·track pinned 추가), 서버 순서 유지(고정 항목 선두), pin 아이콘 표시. live 첫 행 = 몽환적인 일본 인디 락 믹스 · たま★ふぁんこっと · 좋아요 표시한 음악(모두 pin) — **iOS reference의 고정 3개·순서와 일치**. 이어지는 항목은 시점 차이로 reference와 일부 다름.
+  - 곡 목록 모듈은 서버 위치 그대로 row 기반 가로 shelf(4행). 식별: `numItemsPerColumn` + 헤더 "모두 재생" watch + **모든 행의 재생 endpoint가 그 곡의 radio(`playlistId == RDAMVM<videoId>`)**. 같은 형태의 "Shorts에서 들은 음악"은 videoId만 재생해서 구분됨(표본 2개). `shelfId`는 응답마다 새 UUID라 식별자로 못 씀.
+  - 표시 제목은 iOS 기준: 두 모듈 모두 "빠른 선곡". 그 외 shelf는 서버 제목.
+  - **미검증**: 곡 목록 모듈 ↔ iOS 두 번째 "빠른 선곡"의 항목 단위 대응(사용자 관찰만).
+  - 보관함 고정 판정을 badge → 메뉴 toggle(`KEEP_OFF`) 기준으로 변경, badge는 toggle이 없을 때만 fallback. live 보관함 고정 1개 → 2개(좋아요 표시한 음악, 몽환적인 믹스); 세 번째 고정(たま★ふぁんこっと, 동영상)은 보관함 landing 응답에 없음.
+  - Mock Home/보관함 동일.
+
 #### 남은 작업 (2026-09-28)
-1. 보관함 검색 scope를 실제 보관함 데이터로 연결(서버 필터 또는 로드된 항목 로컬 필터 — 결정 필요).
+1. 보관함 검색 scope → 서버 보관함 탭(`agIYBA==`)으로 연결 가능(A6.5-1), 범위 차이 문구 결정 필요.
+1a. (완료) 보관함 고정 판정 → 메뉴 toggle 기준(A6.6). pin/unpin 전후 관찰은 보류.
+1b. 아티스트 vs 구독 아티스트 UI 결정(A6.5-3).
 2. Queue domain: `primary + optional counterpart + segmentMap`(`/next`) 반영 — 미착수. 현재 Mix/라디오는 MockPlayer 로컬 순서.
-3. 쓰기 동작(저장/고정/좋아요)은 미구현 — 범위 결정 필요.
+3. 쓰기 동작 미구현 — A6.5-4 inventory 기준으로 범위 결정 필요(재생목록 삭제·추천 안 함은 비가역).
 4. B2 실험(sig/n만 적용 시 200 여부) — 사용자 승인 대기.
 5. A6 변경 미commit.
 

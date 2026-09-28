@@ -164,12 +164,13 @@ private struct QuickPickTile: View {
 
     var body: some View {
         switch item {
-        case .track(let track):
+        case .track(let track, let pinned):
             Button { player.startMix(from: track) } label: {
-                tile(artwork: track.artwork, title: track.title, pinned: false, playing: player.currentTrack?.id == track.id)
+                tile(artwork: track.artwork, title: track.title, pinned: pinned, playing: player.currentTrack?.id == track.id)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("\(track.title), \(track.artist)")
+            .accessibilityValue(pinned ? "고정됨" : "")
             .accessibilityHint("이 곡으로 믹스 재생")
             .accessibilityIdentifier("track.\(track.id)")
         case .playlist(let playlist, let pinned):
@@ -186,6 +187,13 @@ private struct QuickPickTile: View {
             .buttonStyle(.plain)
             .accessibilityValue(pinned ? "고정됨" : "")
             .accessibilityIdentifier("quickpick.release.\(release.id)")
+        case .artist(let artist, let pinned):
+            NavigationLink(value: Route.artist(artist.id)) {
+                tile(artwork: artist.artwork, title: artist.name, pinned: pinned, playing: false)
+            }
+            .buttonStyle(.plain)
+            .accessibilityValue(pinned ? "고정됨" : "")
+            .accessibilityIdentifier("quickpick.artist.\(artist.id)")
         }
     }
 
