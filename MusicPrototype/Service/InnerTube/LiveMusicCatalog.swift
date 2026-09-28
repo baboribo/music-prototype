@@ -102,6 +102,36 @@ struct LiveMusicCatalog: MusicCatalog {
         LibraryParsing.page(try await client.post("browse", body: ["continuation": .string(continuation.token)]))
     }
 
+    /// The service's own queue (`/next`), as its web player requests it.
+    func queue(_ seed: QueueSeed) async throws -> QueuePage {
+        var body: [String: JSON] = ["isAudioOnly": .bool(true), "enablePersistentPlaylistPanel": .bool(true)]
+        switch seed {
+        case .radio(let track):
+            body["videoId"] = .string(track.id)
+            body["playlistId"] = .string("RDAMVM" + track.id)
+            body["params"] = "wAEB"
+        case .list(let playlistID?, _, let start):
+            body["videoId"] = .string(start.id)
+            body["playlistId"] = .string(playlistID)
+        case .artist(let playlistID?, _):
+            body["playlistId"] = .string(playlistID)
+        case .list(nil, let tracks, let start):
+            // No service playlist to ask for: keep the list as shown.
+            return QueuePage(items: tracks.map { QueueItem(track: $0) }, selectedIndex: tracks.firstIndex { $0.id == start.id })
+        case .artist(nil, let songs):
+            return QueuePage(items: songs.map { QueueItem(track: $0) }, selectedIndex: songs.isEmpty ? nil : 0)
+        }
+        guard let page = QueueParsing.page(try await client.post("next", body: body)) else { throw CatalogError.unexpectedResponse }
+        return page
+    }
+
+    func queuePage(_ continuation: CatalogContinuation) async throws -> QueuePage {
+        guard let page = QueueParsing.page(try await client.post("next", body: ["continuation": .string(continuation.token)])) else {
+            throw CatalogError.unexpectedResponse
+        }
+        return page
+    }
+
     func artist(_ id: Artist.ID) async throws -> ArtistDetail {
         guard let detail = ArtistParsing.detail(try await client.post("browse", body: ["browseId": .string(id)]), id: id) else {
             throw CatalogError.unexpectedResponse
@@ -123,6 +153,8 @@ private struct FailingCatalog: MusicCatalog {
     func library() async throws -> LibraryFeed { throw error }
     func library(_ category: LibraryCategory) async throws -> LibraryPage { throw error }
     func libraryPage(_ continuation: CatalogContinuation) async throws -> LibraryPage { throw error }
+    func queue(_ seed: QueueSeed) async throws -> QueuePage { throw error }
+    func queuePage(_ continuation: CatalogContinuation) async throws -> QueuePage { throw error }
 }
 
 enum SearchParsing {
@@ -259,7 +291,9 @@ enum ReleaseParsing {
             return DetailShelf(id: "\(index)", title: carousel.at("header.musicCarouselShelfBasicHeaderRenderer.title")?.text ?? "",
                                items: items)
         }
-        return ReleaseDetail(release: release, tracks: tracks, shelves: shelves)
+        return ReleaseDetail(release: release, tracks: tracks,
+                             queuePlaylistID: root.all("playlistId").lazy.compactMap(\.string).first { $0.hasPrefix("OLAK5uy_") },
+                             shelves: shelves)
     }
 }
 
@@ -378,5 +412,82 @@ enum LibraryParsing {
         let nodes = list["items"]?.array ?? list["contents"]?.array ?? []
         let token = list.at("continuations.0.nextContinuationData.continuation")?.string
         return (nodes, token)
+    }
+}
+
+enum QueueParsing {
+    /// The first page (watch-next panel) or a continuation.
+    static func page(_ root: JSON) -> QueuePage? {
+        let panel = root.at("contents.singleColumnMusicWatchNextResultsRenderer.tabbedRenderer.watchNextTabbedResultsRenderer.tabs.0.tabRenderer.content.musicQueueRenderer.content.playlistPanelRenderer")
+            ?? root.at("continuationContents.playlistPanelContinuation")
+        guard let panel else { return nil }
+        var selected: Int?
+        var items: [QueueItem] = []
+        for node in panel["contents"]?.array ?? [] {
+            if let renderer = node["playlistPanelVideoRenderer"], let variant = variant(renderer) {
+                if renderer["selected"] == .bool(true) { selected = items.count }
+                items.append(QueueItem(id: entryID(renderer), primary: variant, counterpart: nil, segmentMap: nil,
+                                       unplayableReason: renderer["unplayableText"]?.text))
+            } else if let wrapper = node["playlistPanelVideoWrapperRenderer"],
+                      let renderer = wrapper.at("primaryRenderer.playlistPanelVideoRenderer"), let primary = variant(renderer) {
+                if renderer["selected"] == .bool(true) { selected = items.count }
+                let pair = wrapper.at("counterpart.0")
+                items.append(QueueItem(
+                    id: entryID(renderer), primary: primary,
+                    counterpart: pair?.at("counterpartRenderer.playlistPanelVideoRenderer").flatMap(variant),
+                    segmentMap: pair?["segmentMap"].flatMap(segmentMap),
+                    unplayableReason: renderer["unplayableText"]?.text))
+            }
+        }
+        let token = panel.at("continuations.0.nextRadioContinuationData.continuation")?.string
+            ?? panel.at("continuations.0.nextContinuationData.continuation")?.string
+        return QueuePage(items: items, selectedIndex: selected, next: token.map(CatalogContinuation.init),
+                         isInfinite: panel["isInfinite"] == .bool(true))
+    }
+
+    private static func entryID(_ renderer: JSON) -> String {
+        renderer["playlistSetVideoId"]?.string ?? "\(renderer["videoId"]?.string ?? "?").\(UUID().uuidString)"
+    }
+
+    /// A queue row: "아티스트 • 앨범 • 연도" byline with browse runs; unplayable rows carry only the id.
+    private static func variant(_ renderer: JSON) -> QueueVariant? {
+        guard let videoID = renderer["videoId"]?.string else { return nil }
+        let runs = renderer.at("longBylineText.runs")?.array ?? []
+        func pageType(_ run: JSON) -> String? {
+            run.at("navigationEndpoint.browseEndpoint.browseEndpointContextSupportedConfigs.browseEndpointContextMusicConfig.pageType")?.string
+        }
+        let artists = runs.filter { pageType($0) == "MUSIC_PAGE_TYPE_ARTIST" }
+        let album = runs.first { pageType($0) == "MUSIC_PAGE_TYPE_ALBUM" }
+        let byline = (renderer["shortBylineText"]?.text ?? renderer["longBylineText"]?.text ?? "")
+        let kind: MediaKind = switch renderer.at("navigationEndpoint.watchEndpoint.watchEndpointMusicSupportedConfigs.watchEndpointMusicConfig.musicVideoType")?.string {
+        case "MUSIC_VIDEO_TYPE_ATV": .song
+        case "MUSIC_VIDEO_TYPE_OMV": .officialVideo
+        case "MUSIC_VIDEO_TYPE_UGC": .userVideo
+        default: .other
+        }
+        let track = Track(
+            id: videoID, title: renderer["title"]?.text ?? "",
+            artist: artists.isEmpty ? byline : artists.compactMap { $0["text"]?.string }.joined(separator: ", "),
+            artistID: artists.first?.at("navigationEndpoint.browseEndpoint.browseId")?.string,
+            album: album?["text"]?.string ?? "",
+            releaseID: album?.at("navigationEndpoint.browseEndpoint.browseId")?.string,
+            artwork: ItemParsing.artwork(renderer.at("thumbnail.thumbnails")),
+            duration: ItemParsing.seconds(renderer["lengthText"]?.text).map(Double.init),
+            isExplicit: renderer.all("iconType").contains { $0.string == "MUSIC_EXPLICIT_BADGE" },
+            isPlayable: renderer["unplayableText"] == nil)
+        return QueueVariant(track: track, kind: kind)
+    }
+
+    private static func segmentMap(_ node: JSON) -> SegmentMap? {
+        func ms(_ value: JSON?) -> Double? {
+            (value?.string.flatMap(Double.init) ?? value?.number).map { $0 / 1000 }
+        }
+        let segments = (node["segment"]?.array ?? []).compactMap { segment -> SegmentMap.Segment? in
+            guard let primary = ms(segment["primaryVideoStartTimeMilliseconds"]),
+                  let counterpart = ms(segment["counterpartVideoStartTimeMilliseconds"]),
+                  let duration = ms(segment["durationMilliseconds"]) else { return nil }
+            return SegmentMap.Segment(primaryStart: primary, counterpartStart: counterpart, duration: duration)
+        }
+        return segments.isEmpty ? nil : SegmentMap(segments: segments)
     }
 }

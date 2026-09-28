@@ -205,14 +205,24 @@ playlistPanelVideoWrapperRenderer
   - 흐름 확인: 보관함 → 아티스트(442명, "27곡") → 구독(3명, "구독자 …") → 아티스트 페이지 → 뒤로 시 선택한 scope 유지. 보관함 아티스트 탭도 채널 아티스트 페이지로 이동(MPLA 보관함 곡 목록 페이지는 여전히 미사용). Mock 구독 2명(fixture).
 - write action은 미구현(A6.5-4 inventory 유지).
 
+#### A7 Queue [확인, Simulator live/mock/replay; playback은 여전히 mock]
+- Domain(`Domain/Queue.swift`): `QueueItem { id(=playlistSetVideoId), primary: QueueVariant{track, kind(song/officialVideo/userVideo)}, counterpart: QueueVariant?, segmentMap: SegmentMap?, unplayableReason }`, `SegmentMap`(primary↔counterpart 위치 변환 양방향), `QueuePage { items, selectedIndex, next: CatalogContinuation?, isInfinite }`, `QueueSeed { radio(track) | list(playlistID?, tracks, start) | artist(playlistID?, songs) }`. `MusicCatalog.queue(_:)` / `queuePage(_:)`.
+- `/next` 매핑 [확인]: 요청 `{videoId?, playlistId, params?, isAudioOnly, enablePersistentPlaylistPanel}`. 곡 믹스 = `RDAMVM<videoId>` + `params wAEB`; 앨범 = `OLAK5uy_…` + 시작 videoId(선택 항목이 탭한 곡); 재생목록 = `VL` 제거한 id; 아티스트 재생 = header의 `RDEM…`(videoId 없이, 서버가 첫 곡 선택). 응답 `playlistPanelRenderer.contents`는 `playlistPanelVideoRenderer` 또는 `playlistPanelVideoWrapperRenderer{primaryRenderer, counterpart[0]{counterpartRenderer, segmentMap.segment[]}}`, 현재 항목은 `selected`. continuation: radio/mix = `nextRadioContinuationData`(무한, 49개/page), 재생목록 = `nextContinuationData`; 요청은 `{continuation}`만으로 충분. `automixPreviewVideoRenderer`(앨범 끝 자동 믹스 안내)는 항목 아님 → 무시 [미구현: 앨범 뒤 자동 믹스 이어붙이기].
+- Unplayable: `unplayableText`("[거주 국가에서 차단된 동영상]", title 없음)는 **anonymous 응답에서만 관찰**. 로그인 세션에서는 같은 항목이 재생 가능했고, 보관함에서 GREY_OUT인 곡(A5)은 `/next` 대기열에서 **아예 빠짐**(4 page 확인). 모델·UI(흐림, 선택 불가, next/previous 건너뜀)는 구현했지만 live 화면에서 unplayable 대기열 항목은 **미확인**.
+- Player 상태(`MockPlayer`, 이름 유지): 선택 즉시 탭한 곡 표시 → 서버 queue 도착 시 교체(서버 `selected` 항목, 재생 불가면 첫 재생 가능 항목, 전부 불가면 탭한 곡 유지 + 뒤에 표시). 새 요청이 이전 요청 결과를 덮지 않음(task cancel). shuffle/reorder는 `QueueItem` 단위(원래 서버 순서 보존), continuation은 목록 끝 도달 또는 next로 남은 항목 <5일 때 1회, id로 중복 제거. 곡 전환 버튼 = counterpart 있는 항목에서만 활성, 위치는 `SegmentMap`으로 변환(오디오 없음). 비활성 queue 옵션을 흐리게 표시(기존에는 비활성도 활성처럼 보였음).
+- 확인: live 검색 → Celebrity 믹스(서버 대기열·출처·길이 3:16), 0:59에서 곡 전환 → 영상 1:01/3:18(segmentMap +2.237 s와 일치) → 되돌림 0:59; 대기열 항목 선택; 아티스트 재생 → 서버 `RDEM` 믹스(첫 곡 마음); 대기열 끝 스크롤 → continuation 요청 1회; Full Player 닫기 → Mini Next → 다시 열기 시 현재 곡·Queue 모드·출처·순서 유지; replay에서 anonymous 응답 → 대기열 오류·다시 시도, 탭한 곡 유지·Next 비활성; Mock 대기열 동일.
+- **미검증** (5시간 사용량 80%에서 검증 중단, 2026-09-28): live 앨범/재생목록에서 시작한 대기열의 화면(시작 곡 = 서버 `selected`, probe로 요청·응답만 확인), 대기열 reorder/shuffle과 서버 대기열 조합, 곡 전환 후 next/previous, unplayable 항목 화면, 오류 후 다시 시도 성공 경로(live).
+- 남음(미구현): 앨범 끝 automix, 대기열 저장·재시작 복원(현재 앱 재시작 시 초기화), native player가 `QueueItem`(primary/counterpart/segmentMap)을 직접 소비하도록 연결(B축 결과 이후).
+
 #### 남은 작업 (2026-09-28)
 1. (완료) 보관함 검색 → 서버 보관함 탭(A6.7).
 1a. (완료) 보관함 고정 판정 → 메뉴 toggle 기준(A6.6). pin/unpin 전후 관찰은 보류.
 1b. (완료) 아티스트 보관함/구독 scope(A6.7). 남음: 보관함 아티스트의 MPLA(보관함 곡 목록) 목적지 사용 여부.
-2. Queue domain: `primary + optional counterpart + segmentMap`(`/next`) 반영 — 미착수. 현재 Mix/라디오는 MockPlayer 로컬 순서.
+2. (완료) Queue domain·`/next` 연결(A7). 남음은 A7 항목 참조.
 3. 쓰기 동작 미구현 — A6.5-4 inventory 기준으로 범위 결정 필요(재생목록 삭제·추천 안 함은 비가역).
 4. B2 실험(sig/n만 적용 시 200 여부) — 사용자 승인 대기.
-5. A6.7 변경 미commit.
+5. (완료) A7 checkpoint commit.
+6. 다음 후보(사용자 결정 전 시작 금지): A8 Write Actions, B2 Playback 실험.
 
 ### B. Native playback spike (본 앱과 분리)
 조사 [가설 — 외부 자료, 이 환경 미검증]:

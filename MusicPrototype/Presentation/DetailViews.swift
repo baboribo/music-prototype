@@ -67,7 +67,7 @@ struct ReleaseDetailView: View {
                         SongRow(track: track, leading: .number(index + 1),
                                 subtitle: track.artist == release.artistName ? nil : track.artist,
                                 hideAlbumLink: true) {
-                            player.play(track, in: tracks, source: release.displayTitle)
+                            player.play(track, in: tracks, source: release.displayTitle, playlistID: detail.queuePlaylistID)
                         }
                     }
                 }
@@ -107,7 +107,7 @@ struct ReleaseDetailView: View {
     private func play(shuffled: Bool) {
         let list = shuffled ? tracks.shuffled() : tracks
         guard let first = list.first else { return }
-        player.play(first, in: list, source: release.displayTitle)
+        player.play(first, in: list, source: release.displayTitle, playlistID: shuffled ? nil : detail.queuePlaylistID)
     }
 }
 
@@ -137,6 +137,8 @@ struct PlaylistDetailView: View {
 
     private var playlist: Playlist { detail.playlist }
     private var tracks: [Track] { detail.tracks + more }
+    /// The service playlist behind a `VL…` browse id, which its queue is built from.
+    private var queuePlaylistID: String? { playlist.id.hasPrefix("VL") ? String(playlist.id.dropFirst(2)) : nil }
 
     /// YouTube Music's page line for each source; shown in the footer, not the header.
     private var kindLine: String {
@@ -172,7 +174,7 @@ struct PlaylistDetailView: View {
                     Divider().padding(.horizontal, BrowseMetrics.margin)
                     ForEach(Array(tracks.enumerated()), id: \.offset) { index, track in
                         SongRow(track: track, leading: .artwork, subtitle: track.artist) {
-                            player.play(track, in: tracks, source: playlist.title)
+                            player.play(track, in: tracks, source: playlist.title, playlistID: queuePlaylistID)
                         }
                         .onAppear { if index == tracks.count - 1 { Task { await loadMore() } } }
                     }
@@ -218,7 +220,7 @@ struct PlaylistDetailView: View {
     private func play(shuffled: Bool) {
         let list = (shuffled ? tracks.shuffled() : tracks).filter(\.isPlayable)
         guard let first = list.first else { return }
-        player.play(first, in: list, source: playlist.title)
+        player.play(first, in: list, source: playlist.title, playlistID: shuffled ? nil : queuePlaylistID)
     }
 }
 
@@ -294,7 +296,7 @@ struct ArtistDetailView: View {
                     .disabled(artist.description == nil)
                     .accessibilityLabel("아티스트 정보")
 
-                    Button { player.startRadio(for: artist, songs: detail.songs) } label: {
+                    Button { player.startRadio(for: artist, songs: detail.songs, playlistID: detail.radioPlaylistID) } label: {
                         Image(systemName: "play.fill").font(.title.weight(.semibold)).frame(width: 72, height: 72)
                     }
                     .buttonStyle(.plain)

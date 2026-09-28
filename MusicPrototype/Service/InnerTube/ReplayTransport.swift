@@ -17,6 +17,9 @@ struct ReplayTransport: InnerTubeTransport {
     static func key(_ endpoint: String, body: [String: JSON]) -> String {
         if let token = body["continuation"]?.string { return "\(endpoint):continuation:\(token)" }
         if let id = body["browseId"]?.string { return "\(endpoint):\(id)" }
+        if body["videoId"] != nil || body["playlistId"] != nil {
+            return "\(endpoint):\(body["playlistId"]?.string ?? ""):\(body["videoId"]?.string ?? "")"
+        }
         let query = body["query"]?.string ?? ""
         return "\(endpoint):\(query):\(body["params"]?.string ?? "")"
     }

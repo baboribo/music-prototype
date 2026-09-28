@@ -40,6 +40,8 @@ enum SearchFilter: CaseIterable, Hashable, Sendable {
 struct ReleaseDetail: Sendable {
     let release: Release
     let tracks: [Track]
+    /// The release's playlist on the service (`OLAK5uy_…`), which its queue is built from.
+    var queuePlaylistID: String? = nil
     /// Titled by the service ("맞춤 발표곡"); may hold other artists' releases.
     let shelves: [DetailShelf]
 }
@@ -167,6 +169,8 @@ protocol MusicCatalog: Sendable {
     func library(_ category: LibraryCategory) async throws -> LibraryPage
     func libraryArtists(_ scope: LibraryArtistScope) async throws -> LibraryPage
     func libraryPage(_ continuation: CatalogContinuation) async throws -> LibraryPage
+    func queue(_ seed: QueueSeed) async throws -> QueuePage
+    func queuePage(_ continuation: CatalogContinuation) async throws -> QueuePage
 }
 
 extension EnvironmentValues {
@@ -243,6 +247,27 @@ struct MockMusicCatalog: MusicCatalog {
     }
 
     func libraryPage(_ continuation: CatalogContinuation) async throws -> LibraryPage {
+        throw CatalogError.notFound
+    }
+
+    /// Fixture queues: the prototype's local mix order, or the list as given.
+    func queue(_ seed: QueueSeed) async throws -> QueuePage {
+        let (tracks, start): ([Track], Track?) = switch seed {
+        case .radio(let track):
+            // Mock mix: the seed, then the rest of the catalog in a stable order.
+            {
+                let others = Catalog.tracks.filter { $0.id != track.id }
+                let offset = (Catalog.tracks.firstIndex(of: track) ?? 0) % max(1, others.count)
+                return ([track] + Array(others[offset...] + others[..<offset]), track)
+            }()
+        case .list(_, let tracks, let start): (tracks, start)
+        case .artist(_, let songs): (songs, songs.first)
+        }
+        return QueuePage(items: tracks.map { QueueItem(track: $0) },
+                         selectedIndex: start.flatMap { s in tracks.firstIndex { $0.id == s.id } })
+    }
+
+    func queuePage(_ continuation: CatalogContinuation) async throws -> QueuePage {
         throw CatalogError.notFound
     }
 
