@@ -142,7 +142,8 @@ struct PlaylistDetailView: View {
     private var kindLine: String {
         switch playlist.kind {
         // The page names no owner for user playlists; don't assume it's the listener's.
-        case .user: playlist.owner.isEmpty ? "재생목록" : "재생목록 · \(playlist.owner)"
+        case .user:
+            playlist.isListenersOwn ? "재생목록 · 나" : playlist.owner.isEmpty ? "재생목록" : "재생목록 · \(playlist.owner)"
         case .editorial: "재생목록 · \(playlist.owner)"
         case .mix: "믹스 · 매일 업데이트"
         case .radio: "라디오"
@@ -155,7 +156,7 @@ struct PlaylistDetailView: View {
             VStack(spacing: 0) {
                 DetailHeader(artwork: playlist.artwork, title: playlist.title, subtitle: playlist.owner)
                 PlaybackActions(shuffle: { play(shuffled: true) }, play: { play(shuffled: false) }) {
-                    if playlist.kind == .user || playlist.kind == .automatic {
+                    if playlist.isListenersOwn {
                         // Own lists are already in the library; Apple shows download here.
                         Image(systemName: "arrow.down").font(.body.weight(.semibold)).foregroundStyle(.tertiary)
                             .accessibilityLabel("다운로드 (샘플에서는 사용할 수 없음)")

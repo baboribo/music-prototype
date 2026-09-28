@@ -5,14 +5,56 @@ import SwiftUI
 /// Apple Music Library root (am-library): pinned 3-column grid, category rows,
 /// then a 2-column grid. Entries are YouTube Music's library (pins, recent activity).
 struct LibraryView: View {
+    @Environment(\.musicCatalog) private var catalog
+    @State private var phase: Phase = .loading
+    @State private var attempt = 0
     private let pinnedColumns = Array(repeating: GridItem(.flexible(), spacing: 12, alignment: .top), count: 3)
     private let recentColumns = Array(repeating: GridItem(.flexible(), spacing: 13, alignment: .top), count: 2)
 
+    private enum Phase {
+        case loading
+        case loaded(LibraryFeed)
+        case failed(String)
+    }
+
     var body: some View {
+        Group {
+            switch phase {
+            case .loading:
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            case .failed(let message):
+                ContentUnavailableView {
+                    Label("보관함을 불러오지 못했습니다", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(message)
+                } actions: {
+                    Button("다시 시도") { phase = .loading; attempt += 1 }.buttonStyle(.bordered)
+                }
+            case .loaded(let feed):
+                content(feed)
+            }
+        }
+        .navigationTitle("Library")
+        .toolbarTitleDisplayMode(.inlineLarge)
+        .task(id: attempt) { await load() }
+    }
+
+    /// First appearance and retry only; switching tabs keeps what's loaded.
+    private func load() async {
+        guard case .loading = phase else { return }
+        do {
+            phase = .loaded(try await catalog.library())
+        } catch {
+            guard !Task.isCancelled else { return }
+            phase = .failed(error.localizedDescription)
+        }
+    }
+
+    private func content(_ feed: LibraryFeed) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 LazyVGrid(columns: pinnedColumns, spacing: 16) {
-                    ForEach(Catalog.libraryPinned) { item in
+                    ForEach(feed.pinned) { item in
                         if let route = item.route {
                             NavigationLink(value: route) { pinnedTile(item) }
                                 .buttonStyle(.plain)
@@ -34,7 +76,7 @@ struct LibraryView: View {
 
                 ShelfHeader(title: "최근 활동").padding(.top, 34)
                 LazyVGrid(columns: recentColumns, spacing: 20) {
-                    ForEach(Catalog.libraryRecent) { item in
+                    ForEach(feed.recent) { item in
                         if let route = item.route {
                             NavigationLink(value: route) { GridTile(item: item) }
                                 .buttonStyle(.plain)
@@ -47,8 +89,6 @@ struct LibraryView: View {
                 .padding(.bottom, 24)
             }
         }
-        .navigationTitle("Library")
-        .toolbarTitleDisplayMode(.inlineLarge)
     }
 
     private func pinnedTile(_ item: BrowseItem) -> some View {
@@ -99,34 +139,94 @@ struct GridTile: View {
 }
 
 struct LibraryCategoryView: View {
-    @Environment(MockPlayer.self) private var player
+    @Environment(\.musicCatalog) private var catalog
     let category: LibraryCategory
 
     var body: some View {
-        ScrollView {
-            content.padding(.bottom, 24)
+        CatalogPage { [catalog, category] in try await catalog.library(category) } content: { page in
+            LibraryCategoryList(category: category, first: page)
         }
         .navigationTitle(category.title)
         .navigationBarTitleDisplayMode(.large)
         .accessibilityIdentifier("library.detail.\(category.rawValue)")
     }
+}
+
+/// One library category; further pages load as the list reaches its end.
+private struct LibraryCategoryList: View {
+    @Environment(MockPlayer.self) private var player
+    @Environment(\.musicCatalog) private var catalog
+    let category: LibraryCategory
+    @State private var items: [BrowseItem]
+    @State private var next: CatalogContinuation?
+    @State private var loadingMore = false
+    @State private var loadFailed = false
+
+    init(category: LibraryCategory, first: LibraryPage) {
+        self.category = category
+        _items = State(initialValue: first.items)
+        _next = State(initialValue: first.next)
+    }
+
+    var body: some View {
+        ScrollView {
+            content.padding(.bottom, 24)
+            if next != nil {
+                Group {
+                    if loadFailed {
+                        Button("나머지 다시 불러오기") { Task { await loadMore() } }.buttonStyle(.bordered)
+                    } else {
+                        ProgressView()
+                    }
+                }
+                .padding(.bottom, 24)
+            }
+        }
+    }
+
+    /// Called from inside the lazy containers, so it fires only when the last entry scrolls in.
+    private func loadMoreIfLast(_ id: String) {
+        if id == items.last?.id { Task { await loadMore() } }
+    }
+
+    private func loadMore() async {
+        guard let token = next, !loadingMore else { return }
+        loadingMore = true
+        defer { loadingMore = false }
+        do {
+            let page = try await catalog.libraryPage(token)
+            // Library continuations repeat some entries from the previous page.
+            let seen = Set(items.map(\.id))
+            items += page.items.filter { !seen.contains($0.id) }
+            next = page.next
+            loadFailed = false
+        } catch {
+            loadFailed = true
+        }
+    }
+
+    private var playlists: [Playlist] { items.compactMap { if case .playlist(let v) = $0 { v } else { nil } } }
+    private var songs: [Track] { items.compactMap { if case .track(let v) = $0 { v } else { nil } } }
+    private var releases: [Release] { items.compactMap { if case .release(let v) = $0 { v } else { nil } } }
+    private var artists: [Artist] { items.compactMap { if case .artist(let v) = $0 { v } else { nil } } }
 
     @ViewBuilder private var content: some View {
         switch category {
         case .playlists:
             // Apple's playlist list: 64pt artwork, 80pt pitch, chevron.
             LazyVStack(spacing: 0) {
-                ForEach(Catalog.libraryPlaylists) { playlist in
+                ForEach(playlists) { playlist in
                     NavigationLink(value: Route.playlist(playlist.id)) {
                         listRow(artwork: playlist.artwork, circle: false, size: 64, title: playlist.title,
-                                subtitle: playlist.kind == .user || playlist.kind == .automatic ? nil : playlist.owner)
+                                subtitle: playlist.isListenersOwn || playlist.owner.isEmpty ? nil : playlist.owner)
                     }
                     .buttonStyle(.plain)
                     .accessibilityIdentifier("library.playlist.\(playlist.id)")
+                    .onAppear { loadMoreIfLast("playlist.\(playlist.id)") }
                 }
             }
         case .songs:
-            let songs = Catalog.librarySongs
+            let songs = songs
             VStack(spacing: 16) {
                 HStack(spacing: 13) {
                     capsuleButton("재생", symbol: "play.fill") { play(songs, shuffled: false) }
@@ -138,26 +238,29 @@ struct LibraryCategoryView: View {
                         SongRow(track: track, leading: .artwork, subtitle: track.artist) {
                             player.play(track, in: songs, source: "보관함 노래")
                         }
+                        .onAppear { loadMoreIfLast("track.\(track.id)") }
                     }
                 }
             }
             .padding(.top, 8)
         case .albums:
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 13, alignment: .top), count: 2), spacing: 20) {
-                ForEach(Catalog.libraryReleases) { release in
+                ForEach(releases) { release in
                     NavigationLink(value: Route.release(release.id)) { GridTile(item: .release(release)) }
                         .buttonStyle(.plain)
+                        .onAppear { loadMoreIfLast("release.\(release.id)") }
                 }
             }
             .padding(.horizontal, BrowseMetrics.margin)
             .padding(.top, 8)
         case .artists:
             LazyVStack(spacing: 0) {
-                ForEach(Catalog.libraryArtists) { artist in
+                ForEach(artists) { artist in
                     NavigationLink(value: Route.artist(artist.id)) {
                         listRow(artwork: artist.artwork, circle: true, size: 44, title: artist.name, subtitle: nil)
                     }
                     .buttonStyle(.plain)
+                    .onAppear { loadMoreIfLast("artist.\(artist.id)") }
                 }
             }
         }
@@ -192,7 +295,7 @@ struct LibraryCategoryView: View {
     }
 
     private func play(_ songs: [Track], shuffled: Bool) {
-        let list = shuffled ? songs.shuffled() : songs
+        let list = (shuffled ? songs.shuffled() : songs).filter(\.isPlayable)
         guard let first = list.first else { return }
         player.play(first, in: list, source: "보관함 노래")
     }

@@ -71,6 +71,24 @@ struct LiveMusicCatalog: MusicCatalog {
         PlaylistParsing.page(try await client.post("browse", body: ["continuation": .string(continuation.token)]))
     }
 
+    func library() async throws -> LibraryFeed {
+        LibraryParsing.feed(try await client.post("browse", body: ["browseId": "FEmusic_library_landing"]))
+    }
+
+    func library(_ category: LibraryCategory) async throws -> LibraryPage {
+        let id = switch category {
+        case .playlists: "FEmusic_liked_playlists"
+        case .songs: "FEmusic_liked_videos"
+        case .albums: "FEmusic_liked_albums"
+        case .artists: "FEmusic_library_corpus_track_artists"
+        }
+        return LibraryParsing.page(try await client.post("browse", body: ["browseId": .string(id)]))
+    }
+
+    func libraryPage(_ continuation: CatalogContinuation) async throws -> LibraryPage {
+        LibraryParsing.page(try await client.post("browse", body: ["continuation": .string(continuation.token)]))
+    }
+
     func artist(_ id: Artist.ID) async throws -> ArtistDetail {
         guard let detail = ArtistParsing.detail(try await client.post("browse", body: ["browseId": .string(id)]), id: id) else {
             throw CatalogError.unexpectedResponse
@@ -88,6 +106,9 @@ private struct FailingCatalog: MusicCatalog {
     func artist(_ id: Artist.ID) async throws -> ArtistDetail { throw error }
     func playlist(_ id: Playlist.ID) async throws -> PlaylistDetail { throw error }
     func playlistPage(_ continuation: PlaylistDetail.Continuation) async throws -> PlaylistDetail.Page { throw error }
+    func library() async throws -> LibraryFeed { throw error }
+    func library(_ category: LibraryCategory) async throws -> LibraryPage { throw error }
+    func libraryPage(_ continuation: CatalogContinuation) async throws -> LibraryPage { throw error }
 }
 
 enum SearchParsing {
@@ -227,7 +248,10 @@ enum ArtistParsing {
 enum PlaylistParsing {
     static func detail(_ root: JSON, id: String) -> PlaylistDetail? {
         let columns = root.at("contents.twoColumnBrowseResultsRenderer")
-        guard let header = columns?.at("tabs.0.tabRenderer.content.sectionListRenderer.contents.0.musicResponsiveHeaderRenderer")
+        let top = columns?.at("tabs.0.tabRenderer.content.sectionListRenderer.contents.0")
+        // The listener's own playlists wrap the header in an editable one.
+        let editable = top?["musicEditablePlaylistDetailHeaderRenderer"]
+        guard let header = top?["musicResponsiveHeaderRenderer"] ?? editable?.at("header.musicResponsiveHeaderRenderer")
         else { return nil }
         // "재생목록 • 2026", "자동 재생목록 • 2026", "믹스"; the owner is the facepile's text, when there is one.
         let label = (header["subtitle"]?.text ?? "").components(separatedBy: " • ").first
@@ -243,7 +267,7 @@ enum PlaylistParsing {
             id: id, title: header["title"]?.text ?? "", kind: kind, owner: owner ?? "",
             description: header.at("description.musicDescriptionShelfRenderer.description")?.text,
             artwork: ItemParsing.artwork(header.at("thumbnail.musicThumbnailRenderer.thumbnail.thumbnails")),
-            trackIDs: page.tracks.map(\.id))
+            trackIDs: page.tracks.map(\.id), isOwned: editable != nil ? true : ItemParsing.ownership(header["buttons"]))
         return PlaylistDetail(playlist: playlist, tracks: page.tracks,
                               summary: header["secondSubtitle"]?.text, next: page.next)
     }
@@ -259,5 +283,45 @@ enum PlaylistParsing {
         let tracks = rows.compactMap { $0["musicResponsiveListItemRenderer"].flatMap(ItemParsing.track) }
         let token = rows.lazy.compactMap { $0.at("continuationItemRenderer.continuationEndpoint.continuationCommand.token")?.string }.first
         return PlaylistDetail.Page(tracks: tracks, next: token.map(PlaylistDetail.Continuation.init))
+    }
+}
+
+enum LibraryParsing {
+    /// The library landing grid: pinned items carry a "고정됨" badge and come first.
+    static func feed(_ root: JSON) -> LibraryFeed {
+        let (nodes, _) = container(root)
+        var pinned: [BrowseItem] = []
+        var recent: [BrowseItem] = []
+        for node in nodes {
+            guard let card = node["musicTwoRowItemRenderer"], let item = ItemParsing.card(card) else { continue }
+            if ItemParsing.isPinned(card) { pinned.append(item) } else { recent.append(item) }
+        }
+        return LibraryFeed(pinned: pinned, recent: recent)
+    }
+
+    /// A category page or its continuation: grid cards (playlists, albums) or shelf rows (songs, artists).
+    /// Action entries ("새 재생목록", "모두 셔플") aren't items and are skipped.
+    static func page(_ root: JSON) -> LibraryPage {
+        let (nodes, token) = container(root)
+        let items = nodes.compactMap { node -> BrowseItem? in
+            if let card = node["musicTwoRowItemRenderer"] { return ItemParsing.card(card) }
+            if let row = node["musicResponsiveListItemRenderer"] { return ItemParsing.row(row) }
+            return nil
+        }
+        return LibraryPage(items: items, next: token.map(CatalogContinuation.init))
+    }
+
+    /// First pages nest a grid or shelf in the section list; continuations return it directly.
+    private static func container(_ root: JSON) -> ([JSON], String?) {
+        let sections = root.at("contents.singleColumnBrowseResultsRenderer.tabs.0.tabRenderer.content.sectionListRenderer.contents")?.array ?? []
+        let candidates = sections.flatMap { section -> [JSON] in
+            [section["gridRenderer"], section["musicShelfRenderer"],
+             section.at("itemSectionRenderer.contents.0.gridRenderer"),
+             section.at("itemSectionRenderer.contents.0.musicShelfRenderer")].compactMap(\.self)
+        } + [root.at("continuationContents.gridContinuation"), root.at("continuationContents.musicShelfContinuation")].compactMap(\.self)
+        guard let list = candidates.first else { return ([], nil) }
+        let nodes = list["items"]?.array ?? list["contents"]?.array ?? []
+        let token = list.at("continuations.0.nextContinuationData.continuation")?.string
+        return (nodes, token)
     }
 }

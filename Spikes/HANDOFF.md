@@ -125,15 +125,24 @@ playlistPanelVideoWrapperRenderer
   - footer 곡 수/길이는 서버 `secondSubtitle`("1,110곡 • 6시간 이상") 사용(페이지 일부만 로드되므로).
   - 확인: 편집(Presenting 아이유, 소유자 표시·저장 버튼), 좋아요(자동, 다운로드 자리), 사용자(Made in Japan, 430곡, 62번째 greyed 행 흐리게 표시, 스크롤 끝에서 continuation 1회), 믹스(보관 콘텐츠 믹스), Mock 좋아요 재생목록 동일.
   - 검증 중 발견·수정: (1) 행 컨테이너가 `VStack`이라 마지막 행 onAppear가 즉시 연쇄 → 전체 페이지 자동 로드 → `LazyVStack`으로 수정 후 1회만. (2) Home 탭 복귀 시 Home 5요청 재발생 → 로드된 feed 유지(다시 시도만 재로드), 탭 왕복 후 추가 요청 0 확인.
-  - 미확인: greyed 행 탭 시 재생 안 됨(탭이 스크롤로 빗나가 다른 행이 재생됨; `.disabled` 코드만), live footer의 서버 summary 표시 화면, 재생목록 오류 상태(공용 `CatalogPage`, Release/Artist에서 확인), 사용자 재생목록의 소유권(내 것/남의 것) 판별 방법 — header `buttons` 등 조사 필요.
+  - A5 미확인 항목 재검증(A6 중) [확인]: greyed 행 탭 → 재생 안 됨(ASMR 재생목록, 98/100행이 서버 GREY_OUT); live footer 서버 summary 표시("조회수 9회 • 트랙 2개 • 4분 28초"); 소유권 판별 → 아래 A6.
 
-#### 남은 작업 (2026-09-28, 5시간 사용량 약 80%에서 중단)
-1. A6 Library(FEmusic_liked_playlists, 좋아요/기록/보관함 카테고리, 보관함 검색 scope) — 미착수.
+- **A6 Library [확인, Simulator, live]**: `MusicCatalog.library()` → `LibraryFeed`(pinned, recent), `library(_ category)` / `libraryPage(_:)` → `LibraryPage`(items, next). 실제 응답 기준 반영:
+  - 루트 = `FEmusic_library_landing`(gridRenderer, 최근 활동 순). **고정** 여부는 카드의 `subtitleBadges`(icon `KEEP`, "고정됨")로만 표시 → 고정 항목은 상단 그리드, 나머지는 최근 활동. 이 계정은 고정 1개(좋아요 표시한 음악).
+  - 카테고리: 재생목록 `FEmusic_liked_playlists`(grid, 첫 항목 "새 재생목록" 액션은 제외), 노래 `FEmusic_liked_videos`(shelf, 첫 행 "모두 셔플" 액션 제외), 앨범 `FEmusic_liked_albums`, 아티스트 `FEmusic_library_corpus_track_artists`(보관함 곡의 아티스트, "27곡" 부제). 구독 아티스트(`FEmusic_library_corpus_artists`)는 별도 endpoint이며 기존 UI에 해당 카테고리가 없어 미사용.
+  - 보관함 아티스트 행은 `MUSIC_PAGE_TYPE_LIBRARY_ARTIST` + browseId `MPLA<채널ID>` → 앱은 채널 ID의 아티스트 페이지로 이동(Radwimps 확인).
+  - 페이징: 첫 페이지 `gridRenderer`/`musicShelfRenderer`의 `continuations.nextContinuationData`, 다음 페이지는 `continuationContents.gridContinuation`/`musicShelfContinuation`. **continuation이 이전 페이지 항목 일부를 반복**(재생목록 26+18 중 5개 중복) → id 기준 중복 제거.
+  - **재생목록 소유권**: 보관함 카드 메뉴에 `EDIT` → 내 것, `BOOKMARK`/`BOOKMARK_BORDER`(저장 토글) → 남의 것. 재생목록 페이지는 **내 재생목록이면 header가 `musicEditablePlaylistDetailHeaderRenderer.header.musicResponsiveHeaderRenderer`로 감싸져** 옴(기존 parser가 이 형태를 못 읽어 오류 → 수정). `Playlist.isOwned`(nil = 모름, fixture는 kind로 추론) → 내 것이면 다운로드 자리·footer "재생목록 · 나", 남의 것이면 저장(+) 버튼.
+  - 카드 부제에서 곡 수("트랙 479개", "50곡")를 소유자로 오인하던 문제 수정.
+  - 확인: 루트(고정·최근 활동), 재생목록(스크롤로 continuation, 중복 없음), 노래, 앨범(1), 아티스트→아티스트 페이지, 내 재생목록(보카로인 곡들 모아둠, [?]?), 남의 재생목록(ASMR, 저장 버튼), 요청 수(Home 5 + 보관함 1 + 재생목록 1, 불필요 요청 없음), Mock Library 동일, replay 미녹화 시 오류 상태.
+  - 미반영: 정렬(서버 header의 정렬 메뉴: 최근 활동/최근에 저장됨/최근 재생), 보관함 검색 scope(여전히 로컬 fixture 필터), 고정/저장/좋아요 등 쓰기 동작(요청 없음, 기존 세션 상태 UI 유지).
+
+#### 남은 작업 (2026-09-28)
+1. 보관함 검색 scope를 실제 보관함 데이터로 연결(서버 필터 또는 로드된 항목 로컬 필터 — 결정 필요).
 2. Queue domain: `primary + optional counterpart + segmentMap`(`/next`) 반영 — 미착수. 현재 Mix/라디오는 MockPlayer 로컬 순서.
-3. A5 미확인 항목(위) 재검증.
+3. 쓰기 동작(저장/고정/좋아요)은 미구현 — 범위 결정 필요.
 4. B2 실험(sig/n만 적용 시 200 여부) — 사용자 승인 대기.
-5. (완료) `AGENTS.md` 규칙 갱신: data integration 허용, playback은 spike 분리, 보호 우회는 승인 전 금지.
-6. (완료) A1–A5 checkpoint commit.
+5. A6 변경 미commit.
 
 ### B. Native playback spike (본 앱과 분리)
 조사 [가설 — 외부 자료, 이 환경 미검증]:

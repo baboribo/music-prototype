@@ -87,6 +87,11 @@ struct Playlist: Identifiable, Hashable, Sendable {
     let description: String?
     let artwork: Artwork
     let trackIDs: [Track.ID]
+    /// Whether the listener owns (can edit) it; nil when the source doesn't say.
+    var isOwned: Bool? = nil
+
+    /// Own lists offer download instead of save; fixtures infer it from the kind.
+    var isListenersOwn: Bool { isOwned ?? (kind == .user || kind == .automatic) }
 }
 
 struct Artist: Identifiable, Hashable, Sendable {

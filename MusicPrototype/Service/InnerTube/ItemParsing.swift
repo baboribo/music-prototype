@@ -18,7 +18,13 @@ enum ItemParsing {
 
         if let id = node.at("navigationEndpoint.browseEndpoint.browseId")?.string,
            let pageType = pageType(node.at("navigationEndpoint.browseEndpoint")) {
-            return page(id: id, pageType: pageType, title: title, subtitle: node["subtitle"] ?? .null, artwork: artwork)
+            let item = page(id: id, pageType: pageType, title: title, subtitle: node["subtitle"] ?? .null, artwork: artwork)
+            // Library cards say who owns a playlist through their menu: edit (own) or save (others').
+            if case .playlist(var playlist)? = item, let owned = ownership(node["menu"]) {
+                playlist.isOwned = owned
+                return .playlist(playlist)
+            }
+            return item
         }
         guard let videoID = node.at("navigationEndpoint.watchEndpoint.videoId")?.string else { return nil }
         return .track(Track(
@@ -79,11 +85,15 @@ enum ItemParsing {
         case "MUSIC_PAGE_TYPE_PLAYLIST":
             return .playlist(Playlist(
                 id: id, title: title, kind: playlistKind(id: id, owner: byline.first),
-                // The owner only; "78곡" and view counts stay out of the byline.
-                owner: byline.first ?? "", description: nil,
+                // The owner only; own lists have none, so a count ("트랙 479개", "78곡") can come first.
+                owner: byline.first { !isCount($0) } ?? "", description: nil,
                 artwork: artwork, trackIDs: []))
         case "MUSIC_PAGE_TYPE_ARTIST":
             return .artist(Artist(id: id, name: title, artwork: artwork, description: nil, sections: []))
+        case "MUSIC_PAGE_TYPE_LIBRARY_ARTIST":
+            // Library artists browse as "MPLA" + the channel id; the app opens the artist page.
+            let channel = id.hasPrefix("MPLA") ? String(id.dropFirst(4)) : id
+            return .artist(Artist(id: channel, name: title, artwork: artwork, description: nil, sections: []))
         default:
             return nil
         }
@@ -119,6 +129,19 @@ enum ItemParsing {
 
     // MARK: Fields
 
+    /// `EDIT` → the listener's own list; `BOOKMARK*` (save toggle) → someone else's; neither → unknown.
+    static func ownership(_ node: JSON?) -> Bool? {
+        guard let icons = node?.all("iconType").compactMap(\.string) else { return nil }
+        if icons.contains("EDIT") { return true }
+        if icons.contains("BOOKMARK") || icons.contains("BOOKMARK_BORDER") { return false }
+        return nil
+    }
+
+    /// The listener pinned it in the library ("고정됨" badge).
+    static func isPinned(_ node: JSON) -> Bool {
+        node["subtitleBadges"]?.all("iconType").contains { $0.string == "KEEP" } ?? false
+    }
+
     private static func pageType(_ endpoint: JSON?) -> String? {
         endpoint?.at("browseEndpointContextSupportedConfigs.browseEndpointContextMusicConfig.pageType")?.string
     }
@@ -140,6 +163,10 @@ enum ItemParsing {
         case "ep": .ep
         default: nil
         }
+    }
+
+    private static func isCount(_ text: String) -> Bool {
+        text.wholeMatch(of: /(트랙 )?[\d,.]+(만|천)?(곡|개|회)|[\d,]+ (tracks|songs|views)/) != nil || text.hasPrefix("조회수")
     }
 
     private static func isTypeLabel(_ text: String) -> Bool {

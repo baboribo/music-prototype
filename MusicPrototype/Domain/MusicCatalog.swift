@@ -44,12 +44,26 @@ struct ReleaseDetail: Sendable {
     let shelves: [DetailShelf]
 }
 
+/// Opaque to views; only the catalog that issued it can use it.
+struct CatalogContinuation: Hashable, Sendable {
+    let token: String
+}
+
+/// The library root: the listener's pinned items, then recent activity.
+struct LibraryFeed: Sendable {
+    let pinned: [BrowseItem]
+    let recent: [BrowseItem]
+}
+
+/// One page of a library category, in the service's order.
+struct LibraryPage: Sendable {
+    let items: [BrowseItem]
+    var next: CatalogContinuation? = nil
+}
+
 /// A playlist page. Long lists arrive in pages; `next` fetches the rest.
 struct PlaylistDetail: Sendable {
-    /// Opaque to views; only the catalog that issued it can use it.
-    struct Continuation: Hashable, Sendable {
-        let token: String
-    }
+    typealias Continuation = CatalogContinuation
 
     struct Page: Sendable {
         let tracks: [Track]
@@ -129,6 +143,9 @@ protocol MusicCatalog: Sendable {
     func artist(_ id: Artist.ID) async throws -> ArtistDetail
     func playlist(_ id: Playlist.ID) async throws -> PlaylistDetail
     func playlistPage(_ continuation: PlaylistDetail.Continuation) async throws -> PlaylistDetail.Page
+    func library() async throws -> LibraryFeed
+    func library(_ category: LibraryCategory) async throws -> LibraryPage
+    func libraryPage(_ continuation: CatalogContinuation) async throws -> LibraryPage
 }
 
 extension EnvironmentValues {
@@ -177,6 +194,24 @@ struct MockMusicCatalog: MusicCatalog {
     }
 
     func playlistPage(_ continuation: PlaylistDetail.Continuation) async throws -> PlaylistDetail.Page {
+        throw CatalogError.notFound
+    }
+
+    func library() async throws -> LibraryFeed {
+        LibraryFeed(pinned: Catalog.libraryPinned, recent: Catalog.libraryRecent)
+    }
+
+    func library(_ category: LibraryCategory) async throws -> LibraryPage {
+        let items: [BrowseItem] = switch category {
+        case .playlists: Catalog.libraryPlaylists.map(BrowseItem.playlist)
+        case .songs: Catalog.librarySongs.map(BrowseItem.track)
+        case .albums: Catalog.libraryReleases.map(BrowseItem.release)
+        case .artists: Catalog.libraryArtists.map(BrowseItem.artist)
+        }
+        return LibraryPage(items: items)
+    }
+
+    func libraryPage(_ continuation: CatalogContinuation) async throws -> LibraryPage {
         throw CatalogError.notFound
     }
 
