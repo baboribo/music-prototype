@@ -7,6 +7,7 @@ private enum AppTab: Hashable {
 struct AppShell: View {
     @Environment(MockPlayer.self) private var player
     @Environment(LibraryActions.self) private var actions
+    @Environment(AccountSession.self) private var account
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityPrefersCrossFadeTransitions) private var prefersCrossFade
     @State private var selectedTab: AppTab = .home
@@ -50,6 +51,26 @@ struct AppShell: View {
                     Text("YouTube Music").tag(SearchScope.catalog)
                     Text("보관함").tag(SearchScope.library)
                 }
+            }
+        }
+        // A new sign-in or a sign-out: account data on screen belongs to the previous session.
+        .id(account.generation)
+        .onChange(of: account.generation) {
+            homePath = []
+            libraryPath = []
+            searchPath = []
+        }
+        .task { await account.refresh() }
+        .sheet(isPresented: Bindable(account).isPresentingSignIn, onDismiss: { Task { await account.signInClosed() } }) {
+            NavigationStack {
+                account.signInView()
+                    .navigationTitle("YouTube Music 로그인")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("완료") { account.isPresentingSignIn = false }
+                        }
+                    }
             }
         }
         .tabViewSearchActivation(.searchTabSelection)

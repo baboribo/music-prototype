@@ -7,12 +7,13 @@ protocol InnerTubeTransport: Sendable {
 }
 
 /// Signed-in WEB_REMIX requests to music.youtube.com's InnerTube API (browse data
-/// only; no playback). Client version from yt-dlp master, 2026-09.
+/// only; no playback). The client version is the signed-in page's own when known.
 struct InnerTubeClient: InnerTubeTransport {
     private static let host = "music.youtube.com"
     private static let clientName = "WEB_REMIX"
     private static let clientNameID = "67"
-    private static let clientVersion = "1.20260707.12.00"
+    /// Used only when no signed-in page reported its own (the page value on 2026-09-29).
+    static let fallbackClientVersion = "1.20260927.17.00"
     private static let userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
 
     private let store: SessionCredentialStore
@@ -37,14 +38,16 @@ struct InnerTubeClient: InnerTubeTransport {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
         request.setValue(Self.clientNameID, forHTTPHeaderField: "X-YouTube-Client-Name")
-        request.setValue(Self.clientVersion, forHTTPHeaderField: "X-YouTube-Client-Version")
+        let clientVersion = credential.clientVersion ?? Self.fallbackClientVersion
+        request.setValue(clientVersion, forHTTPHeaderField: "X-YouTube-Client-Version")
         request.setValue(origin, forHTTPHeaderField: "Origin")
         request.setValue("\(origin)/", forHTTPHeaderField: "Referer")
         if let visitor = credential.visitorID { request.setValue(visitor, forHTTPHeaderField: "X-Goog-Visitor-Id") }
+        if let pageID = credential.pageID { request.setValue(pageID, forHTTPHeaderField: "X-Goog-PageId") }
         for (name, value) in credential.headers(origin: origin) { request.setValue(value, forHTTPHeaderField: name) }
 
         var client: [String: JSON] = [
-            "clientName": .string(Self.clientName), "clientVersion": .string(Self.clientVersion),
+            "clientName": .string(Self.clientName), "clientVersion": .string(clientVersion),
             "hl": "ko", "gl": "KR",
         ]
         if let visitor = credential.visitorID { client["visitorData"] = .string(visitor) }

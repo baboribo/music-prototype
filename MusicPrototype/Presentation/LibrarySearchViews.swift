@@ -16,7 +16,7 @@ struct LibraryView: View {
     private enum Phase {
         case loading
         case loaded(LibraryFeed)
-        case failed(String)
+        case failed(LoadFailure)
     }
 
     var body: some View {
@@ -24,14 +24,8 @@ struct LibraryView: View {
             switch phase {
             case .loading:
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
-            case .failed(let message):
-                ContentUnavailableView {
-                    Label("보관함을 불러오지 못했습니다", systemImage: "exclamationmark.triangle")
-                } description: {
-                    Text(message)
-                } actions: {
-                    Button("다시 시도") { phase = .loading; attempt += 1 }.buttonStyle(.bordered)
-                }
+            case .failed(let failure):
+                LoadFailureView(title: "보관함을 불러오지 못했습니다", failure: failure) { phase = .loading; attempt += 1 }
             case .loaded(let feed):
                 content(feed)
             }
@@ -51,7 +45,7 @@ struct LibraryView: View {
             loadedRevision = revision
         } catch {
             guard !Task.isCancelled else { return }
-            phase = .failed(error.localizedDescription)
+            phase = .failed(LoadFailure(error))
         }
     }
 
@@ -372,7 +366,7 @@ struct SearchView: View {
         case idle
         case loading
         case loaded(SearchResults)
-        case failed(String)
+        case failed(LoadFailure)
     }
 
     private struct RequestKey: Equatable {
@@ -423,15 +417,9 @@ struct SearchView: View {
                     ForEach(items) { resultRow($0) }
                 }
             }
-        } else if case .failed(let message) = remote {
-            ContentUnavailableView {
-                Label("검색하지 못했습니다", systemImage: "exclamationmark.triangle")
-            } description: {
-                Text(message)
-            } actions: {
-                Button("다시 시도") { attempt += 1 }.buttonStyle(.bordered)
-            }
-            .padding(.top, 40)
+        } else if case .failed(let failure) = remote {
+            LoadFailureView(title: "검색하지 못했습니다", failure: failure) { attempt += 1 }
+                .padding(.top, 40)
         } else {
             ProgressView().frame(maxWidth: .infinity).padding(.top, 60)
         }
@@ -456,7 +444,7 @@ struct SearchView: View {
             loadedKey = key
         } catch {
             guard !Task.isCancelled else { return }
-            remote = .failed(error.localizedDescription)
+            remote = .failed(LoadFailure(error))
         }
     }
 

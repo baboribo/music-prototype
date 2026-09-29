@@ -6,12 +6,15 @@ struct MusicPrototypeApp: App {
     @State private var searchHistory = SearchHistory()
     @State private var changes: CatalogChanges
     @State private var actions: LibraryActions
+    @State private var account: AccountSession
     private let catalog: any MusicCatalog
 
     init() {
-        let catalog = LiveMusicCatalog.fromEnvironment() ?? MockMusicCatalog()
+        let services = AppServices.make()
+        let catalog = services.catalog
         let changes = CatalogChanges()
         self.catalog = catalog
+        _account = State(initialValue: services.account)
         let actions = LibraryActions(catalog: catalog, changes: changes)
         _changes = State(initialValue: changes)
         _actions = State(initialValue: actions)
@@ -25,6 +28,7 @@ struct MusicPrototypeApp: App {
                 .environment(searchHistory)
                 .environment(changes)
                 .environment(actions)
+                .environment(account)
                 .environment(\.musicCatalog, catalog)
                 .tint(.indigo)
         }

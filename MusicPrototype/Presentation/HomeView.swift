@@ -6,6 +6,7 @@ struct HomeView: View {
     @Environment(MockPlayer.self) private var player
     @Environment(\.musicCatalog) private var catalog
     @Environment(CatalogChanges.self) private var changes
+    @Environment(AccountSession.self) private var account
     @State private var phase: Phase = .loading
     @State private var attempt = 0
     @State private var loadedRevision = 0
@@ -13,7 +14,7 @@ struct HomeView: View {
     private enum Phase {
         case loading
         case loaded(HomeFeed)
-        case failed(String)
+        case failed(LoadFailure)
     }
 
     var body: some View {
@@ -22,6 +23,11 @@ struct HomeView: View {
             .navigationTitle("Home")
             // Apple's tab roots put the large title on the toolbar row (IMG_4032, am-library).
             .toolbarTitleDisplayMode(.inlineLarge)
+            .toolbar {
+                if account.canSignIn {
+                    ToolbarItem(placement: .topBarTrailing) { AccountMenu() }
+                }
+            }
             .task(id: attempt) { await load() }
             .task(id: changes.revision(.home)) { await reloadIfChanged() }
     }
@@ -30,15 +36,8 @@ struct HomeView: View {
         switch phase {
         case .loading:
             ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
-        case .failed(let message):
-            ContentUnavailableView {
-                Label("Home을 불러오지 못했습니다", systemImage: "exclamationmark.triangle")
-            } description: {
-                Text(message)
-            } actions: {
-                Button("다시 시도") { phase = .loading; attempt += 1 }
-                    .buttonStyle(.bordered)
-            }
+        case .failed(let failure):
+            LoadFailureView(title: "Home을 불러오지 못했습니다", failure: failure) { phase = .loading; attempt += 1 }
         case .loaded(let feed):
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 34) {
@@ -69,7 +68,7 @@ struct HomeView: View {
         } catch {
             // Leaving the tab cancels the request; the next appearance retries.
             guard !Task.isCancelled else { return }
-            phase = .failed(error.localizedDescription)
+            phase = .failed(LoadFailure(error))
         }
     }
 

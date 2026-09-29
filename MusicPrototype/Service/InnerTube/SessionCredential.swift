@@ -1,15 +1,33 @@
 import CryptoKit
 import Foundation
 
-/// The user's own signed-in music.youtube.com browser session, read from a file
-/// outside the repository. Values stay in memory: never logged, persisted or copied.
-/// A static cookie can stop working at any time (sign-out elsewhere, rotation),
-/// so it is only ever handed out through `SessionCredentialStore`.
+/// The user's own signed-in music.youtube.com session: the app's WebKit store, or (development)
+/// a browser export file outside the repository. Values stay in memory: never logged, persisted
+/// or copied. A cookie can stop working at any time (sign-out elsewhere, rotation), so it is only
+/// ever handed out through `SessionCredentialStore`.
 struct SessionCredential: Sendable {
     private let cookie: String
     private let authUser: String
     /// The session's own visitor id; requests must not mix it with an anonymous one.
     let visitorID: String?
+    /// The signed-in page's own client version, when known.
+    var clientVersion: String?
+    /// A brand channel's delegated session (`X-Goog-PageId`), when the page names one.
+    var pageID: String?
+
+    private init(cookie: String, authUser: String, visitorID: String?) {
+        self.cookie = cookie
+        self.authUser = authUser
+        self.visitorID = visitorID
+    }
+
+    /// From the WebKit store's cookies and the signed-in page's config.
+    init(cookies: [HTTPCookie], page: WebKitSession.PageConfig?) {
+        self.init(cookie: HTTPCookie.requestHeaderFields(with: cookies)["Cookie"] ?? "",
+                  authUser: page?.sessionIndex ?? "0", visitorID: page?.visitorData)
+        clientVersion = page?.clientVersion
+        pageID = page?.delegatedSessionID
+    }
 
     enum LoadError: LocalizedError {
         case insideRepository
@@ -71,30 +89,90 @@ struct SessionCredential: Sendable {
     }
 }
 
-/// Owns the session file and its known validity. Once the server rejects the
-/// session, that version of the file is never sent again; replacing the file at
-/// the same path (a fresh sign-in) makes the next request pick it up.
+/// Hands out the current credential and remembers which one the server rejected.
+///
+/// - `.webKit`: the app's WebKit store (production). A cookie set the server rejected is
+///   identified by an in-memory fingerprint and not sent again; signing in again changes it.
+/// - `.file`: a browser export outside the repository (development). Once rejected, that version
+///   of the file is not sent again; replacing the file (a fresh sign-in) is picked up.
 actor SessionCredentialStore {
-    private let path: String
+    enum Source: Sendable {
+        case webKit(WebKitSession)
+        case file(String)
+    }
+
+    private let source: Source
     private var loaded: (credential: SessionCredential, version: Date?)?
     /// Modification date of the file version the server rejected.
     private var rejectedVersion: Date??
+    private var rejectedFingerprint: String?
+    private var page: (fingerprint: String, task: Task<WebKitSession.PageConfig?, Never>)?
+    private var lastFingerprint: String?
+    private var onRejected: (@Sendable () -> Void)?
 
-    init(path: String) { self.path = path }
+    init(source: Source) { self.source = source }
 
-    func current() throws -> SessionCredential {
-        let version = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
-        if let rejectedVersion, rejectedVersion == version { throw CatalogError.signedOut }
-        if let loaded, loaded.version == version { return loaded.credential }
-        let credential = try SessionCredential.load(path: path)
-        loaded = (credential, version)
-        rejectedVersion = nil
-        return credential
+    /// Called whenever the server rejects the session (for the account state).
+    func setOnRejected(_ handler: @escaping @Sendable () -> Void) { onRejected = handler }
+
+    func current() async throws -> SessionCredential {
+        switch source {
+        case .file(let path):
+            let version = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+            if let rejectedVersion, rejectedVersion == version { throw CatalogError.signedOut }
+            if let loaded, loaded.version == version { return loaded.credential }
+            let credential = try SessionCredential.load(path: path)
+            loaded = (credential, version)
+            rejectedVersion = nil
+            return credential
+        case .webKit(let session):
+            let cookies = await session.cookies()
+            guard let fingerprint = Self.fingerprint(cookies) else { throw CatalogError.signedOut }
+            if fingerprint == rejectedFingerprint { throw CatalogError.signedOut }
+            lastFingerprint = fingerprint
+            // The page config (client version, account index, visitor) is read once per signed-in session.
+            if page?.fingerprint != fingerprint {
+                page = (fingerprint, Task { await session.pageConfig() })
+            }
+            let config = await page?.task.value
+            return SessionCredential(cookies: cookies, page: config)
+        }
+    }
+
+    /// Whether a usable session is there now (no request is made).
+    func isSignedIn() async -> Bool {
+        do {
+            _ = try await current()
+            if case .webKit = source, let config = await page?.task.value, !config.loggedIn { return false }
+            return true
+        } catch {
+            return false
+        }
     }
 
     func markRejected() {
-        rejectedVersion = .some(loaded?.version)
+        switch source {
+        case .file: rejectedVersion = .some(loaded?.version); loaded = nil
+        case .webKit: rejectedFingerprint = lastFingerprint; page = nil
+        }
+        onRejected?()
+    }
+
+    /// After a sign-in or sign-out: forget what was learned about the previous session.
+    func reset() {
+        rejectedFingerprint = nil
+        rejectedVersion = nil
+        page = nil
         loaded = nil
+    }
+
+    /// Identifies the signed-in cookie set without keeping its values (SHA-256, memory only).
+    /// Nil when the store holds no signed-in session.
+    private static func fingerprint(_ cookies: [HTTPCookie]) -> String? {
+        let names = ["SAPISID", "__Secure-3PAPISID", "SID", "__Secure-3PSID"]
+        let values = names.compactMap { name in cookies.first { $0.name == name }.map { "\(name)=\($0.value)" } }
+        guard values.contains(where: { $0.hasPrefix("SAPISID=") || $0.hasPrefix("__Secure-3PAPISID=") }) else { return nil }
+        return SHA256.hash(data: Data(values.joined(separator: ";").utf8)).map { String(format: "%02x", $0) }.joined()
     }
 }
 

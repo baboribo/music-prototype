@@ -161,7 +161,7 @@ enum CatalogError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .signedOut: "YouTube Music 세션이 만료되었거나 로그아웃되었습니다. 다시 로그인한 세션으로 갱신한 뒤 다시 시도하세요."
+        case .signedOut: "YouTube Music에 로그인되어 있지 않거나 세션이 만료되었습니다."
         case .notRecorded: "이 요청은 녹화된 응답이 없습니다."
         case .notFound: "페이지를 찾을 수 없습니다."
         case .http(let status): "YouTube Music 서버 오류 (HTTP \(status))"

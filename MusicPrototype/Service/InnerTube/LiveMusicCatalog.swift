@@ -6,25 +6,20 @@ struct LiveMusicCatalog: MusicCatalog {
     private let client: any InnerTubeTransport
     private static let log = Logger(subsystem: "MusicPrototype", category: "InnerTube")
 
-    /// `YTM_SESSION_FILE`: the user's session file (outside the repository) for live data.
-    /// `YTM_REPLAY_DIR` (debug builds): recorded responses instead of any request.
-    /// Neither: the app stays on fixtures.
-    static func fromEnvironment() -> (any MusicCatalog)? {
-        let environment = ProcessInfo.processInfo.environment
-        do {
-            #if DEBUG
-            if let directory = environment["YTM_REPLAY_DIR"], !directory.isEmpty {
-                return LiveMusicCatalog(client: try ReplayTransport(directory: directory))
-            }
-            #endif
-            guard let path = environment["YTM_SESSION_FILE"], !path.isEmpty else { return nil }
-            _ = try ExternalFile.validate(path)
-            return LiveMusicCatalog(client: InnerTubeClient(store: SessionCredentialStore(path: path)))
-        } catch {
-            log.error("catalog source rejected: \(error.localizedDescription, privacy: .public)")
-            return FailingCatalog(error: error)
-        }
+    /// Signed-in requests with the store's current credential (see `AppServices` for the sources).
+    static func live(store: SessionCredentialStore) -> LiveMusicCatalog {
+        LiveMusicCatalog(client: InnerTubeClient(store: store))
     }
+
+    #if DEBUG
+    /// Recorded responses instead of any request.
+    static func replay(directory: String) throws -> LiveMusicCatalog {
+        LiveMusicCatalog(client: try ReplayTransport(directory: directory))
+    }
+    #endif
+
+    /// Every request fails with the source's configuration error.
+    static func failing(_ error: any Error) -> any MusicCatalog { FailingCatalog(error: error) }
 
     func home() async throws -> HomeFeed {
         let started = ContinuousClock.now

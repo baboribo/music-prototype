@@ -507,3 +507,53 @@ func durationSummary(_ tracks: [Track]) -> String {
     let minutes = Int((tracks.reduce(0) { $0 + ($1.duration ?? 0) } / 60).rounded())
     return "\(tracks.count)곡, \(minutes)분"
 }
+
+/// A failed load: the message, retry, and sign-in when the session is what failed.
+struct LoadFailureView: View {
+    @Environment(AccountSession.self) private var account
+    let title: String
+    let failure: LoadFailure
+    let retry: () -> Void
+
+    var body: some View {
+        ContentUnavailableView {
+            Label(failure.needsSignIn && account.canSignIn ? "로그인이 필요합니다" : title,
+                  systemImage: failure.needsSignIn ? "person.crop.circle.badge.exclamationmark" : "exclamationmark.triangle")
+        } description: {
+            Text(failure.message)
+        } actions: {
+            if failure.needsSignIn && account.canSignIn {
+                Button("로그인") { account.presentSignIn() }.buttonStyle(.borderedProminent)
+            } else {
+                Button("다시 시도", action: retry).buttonStyle(.bordered)
+            }
+        }
+    }
+}
+
+/// Account entry on the Home toolbar (where Apple Music keeps its account button).
+struct AccountMenu: View {
+    @Environment(AccountSession.self) private var account
+    @State private var confirmingSignOut = false
+
+    var body: some View {
+        Menu {
+            switch account.state {
+            case .signedIn:
+                Button("로그아웃", systemImage: "rectangle.portrait.and.arrow.right", role: .destructive) { confirmingSignOut = true }
+            case .signedOut:
+                Button("로그인", systemImage: "person.crop.circle") { account.presentSignIn() }
+            case .checking, .unmanaged:
+                EmptyView()
+            }
+        } label: {
+            Label("계정", systemImage: account.state == .signedOut ? "person.crop.circle.badge.exclamationmark" : "person.crop.circle")
+        }
+        .accessibilityIdentifier("account.menu")
+        .confirmationDialog("이 기기에서 로그아웃할까요?", isPresented: $confirmingSignOut, titleVisibility: .visible) {
+            Button("로그아웃", role: .destructive) { Task { await account.signOut() } }
+        } message: {
+            Text("이 앱에 저장된 YouTube Music 로그인만 지웁니다. 다른 기기와 브라우저의 로그인은 그대로입니다.")
+        }
+    }
+}

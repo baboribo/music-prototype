@@ -524,6 +524,26 @@ production 관점 비용 (판단 재료, 미결정):
 - base.js(약 2.6 MB)를 player 버전마다 받아 파싱(node 기준 ~0.35 s) → 캐시 필요.
 
 
+## 10. 본 앱 통합 (2026-09-30~)
+
+B2/B3 feasibility 완료(사용자 결정). spike는 reference로 보존하고 production component만 MusicPrototype으로 추출한다.
+
+### P1. Production Auth [확인, iPhone 15 Pro Max iOS 27.2]
+구조:
+```
+AppServices.make()            (launch 시 1회: 기본 WebKit / YTM_SESSION_FILE / YTM_REPLAY_DIR(debug) / YTM_MOCK=1)
+SessionCredentialStore(actor)
+├─ .webKit(WebKitSession)     ← 실제 앱
+└─ .file(path)                ← 개발/debug fallback (기존 동작 유지)
+AccountSession (Domain, @Observable) ← AccountBackend(protocol) ← WebKitAccountBackend (Service/Auth)
+```
+- `WebKitSession`(MainActor): 앱 자체 `WKWebsiteDataStore(forIdentifier:)`(id: UserDefaults `webSession.storeID`, spike store와 분리) 참조 유지. cookie 읽기(HttpOnly 포함), 숨은 WKWebView로 music.youtube.com `ytcfg` 읽기(WEB_REMIX일 때만: client version, SESSION_INDEX→`X-Goog-AuthUser`, VISITOR_DATA, DELEGATED_SESSION_ID→`X-Goog-PageId`, 12 s 제한), 로컬 로그아웃(store website data 전부 삭제), 로그인 web view(spike와 같은 universal-link 재발행). 로그는 host/path·존재 여부·공개 client version만.
+- `SessionCredentialStore`: webKit이면 요청 시점에 cookie → `SessionCredential(cookies:page:)`. page config는 로그인 session(fingerprint)당 1회(Task로 중복 제거). 서버 거부(HTTP 401/403, `logged_in=0`) 시 그 cookie 조합의 **fingerprint(SHA-256, 메모리만)**를 기억해 다시 보내지 않음 → 재로그인으로 cookie가 바뀌면 자동 해제. 거부 시 `onRejected` → `AccountSession.sessionRejected()`.
+- `InnerTubeClient`: client version = page 값 우선, 없으면 `1.20260927.17.00`(이전 하드코딩 `1.20260707.12.00` 교체). `X-Goog-PageId`는 page가 줄 때만.
+- UI(재디자인 없음): Home toolbar 오른쪽 계정 메뉴(`AccountMenu`: 로그인 / 로그아웃+확인 dialog, Apple Music이 계정 버튼을 두는 위치), 기존 실패 화면을 `LoadFailureView`로 통일 — signedOut이면 "로그인이 필요합니다" + 로그인 버튼. 로그인 sheet(시스템 sheet + web view, "완료"). sign-in/out 시 `generation` 증가 → TabView 내용·navigation path 초기화(이전 session 데이터 제거). View/Domain/MusicCatalog은 WebKit·credential 구현을 모름.
+- 실기기 E2E [확인, 사용자]: signedOut 화면 → 로그인(앱 안 sheet) → Home 실데이터 → 앱 완전 종료 후 재실행 시 로그인 유지 → 계정 메뉴 로컬 로그아웃 → signedOut → 앱 재시작 없이 재로그인 → Home 실데이터.
+- 미검증/후속(유지): 브랜드 채널(`X-Goog-PageId` 경로 코드만 있음), 장기 cookie 회전·만료, 서버 측 logout(하지 않음), 다른 기기 승인 2FA의 universal link 경로, Google 내장 WebView 차단 화면 안내.
+
 ## 9. 민감정보 / 정리
 
 - `~/.config/itprobe/`의 `browser-headers.itprobe-auth`(전체 로그인 세션), `oauth.itprobe-auth`(refresh token 포함), `oauth-client.env`, `oauth-client.env.save`(client secret)는 저장소 밖 파일이며 실험 후 삭제 권장. GCP OAuth client와 Google 계정의 앱 접근 권한도 해제 가능.

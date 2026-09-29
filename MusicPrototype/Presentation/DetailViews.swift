@@ -15,7 +15,7 @@ struct CatalogPage<Value: Sendable, Content: View>: View {
     private enum Phase {
         case loading
         case loaded(Value)
-        case failed(String)
+        case failed(LoadFailure)
     }
 
     var body: some View {
@@ -26,14 +26,8 @@ struct CatalogPage<Value: Sendable, Content: View>: View {
             case .loaded(let value):
                 // A reloaded value starts its content fresh (paging state included).
                 content(value).id(loadedRevision)
-            case .failed(let message):
-                ContentUnavailableView {
-                    Label("페이지를 불러오지 못했습니다", systemImage: "exclamationmark.triangle")
-                } description: {
-                    Text(message)
-                } actions: {
-                    Button("다시 시도") { phase = .loading; attempt += 1 }.buttonStyle(.bordered)
-                }
+            case .failed(let failure):
+                LoadFailureView(title: "페이지를 불러오지 못했습니다", failure: failure) { phase = .loading; attempt += 1 }
             }
         }
         .task(id: attempt) {
@@ -44,7 +38,7 @@ struct CatalogPage<Value: Sendable, Content: View>: View {
                 loadedRevision = revision
             } catch {
                 guard !Task.isCancelled else { return }
-                phase = .failed(error.localizedDescription)
+                phase = .failed(LoadFailure(error))
             }
         }
         .task(id: currentRevision) {
