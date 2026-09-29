@@ -310,7 +310,7 @@ playlistPanelVideoWrapperRenderer
 5. (완료) A7 checkpoint commit.
 6. (완료) A8 Write Actions: 좋아요·앨범/재생목록/믹스 저장·곡 보관함·다시 듣기 고정(A8.1–A8.7). 구독은 (c) 방향으로 미연결.
 7. (완료, 8절 C) 앱 내부 인증/session feasibility spike. 남은 실기기·사용자 참여 항목은 C 참조.
-8. 다음: B2 Playback feasibility spike(승인됨, 별도 spike).
+8. B2 진행 중: 1차 분리 실험 완료(B2 1차 참조). sig/n 실행 방법(직접 solver vs 외부 solver) 사용자 결정 대기.
 
 ### C. In-app authentication / session (2026-09-29, `Spikes/WebPlayerSpike` 확장, 본 앱 미연결)
 목표: 사용자가 DevTools로 cookie를 복사하지 않고, 공개 iOS/WebKit API만으로 로그인·유지·만료·재인증·로그아웃. 개발용 `YTM_SESSION_FILE`은 유지.
@@ -353,6 +353,21 @@ spike 구성: `WebPlayerSpike/AuthProbe.swift`(기존 앱·bundle 재사용, 새
 - 필수성 분리 실험(제안, 미실행): Premium cookie + WEB_REMIX `signatureCipher` 오디오(itag 141/774) 또는 WEB_SAFARI HLS에 sig/n만 적용 → 200이면 POT/SABR 불필요 확정. 이 실험 자체가 player JS challenge 해결 = 합의된 "우회 구현 전 보고" 경계라 사용자 승인 후 진행.
 
 그 외 미검증: authenticated IOS 계열(cookie 비적용·OAuth 거부), 추가 client, 실제 기기 AVPlayer(재생 가능한 URL 없음).
+
+#### B2 1차 분리 실험 (2026-09-29, `Spikes/InnerTubeProbe`, 본 앱 무관) [확인]
+- 결정 반영: probe의 WEB_REMIX client version을 로그인된 페이지 값 `1.20260927.17.00`으로 갱신. 대상 밤편지 ATV `NnRjwEhFU70`, Premium cookie.
+- **`/player` WEB_REMIX**: `OK`, audio 6개(itag 140/141 AAC, 249/250/251/774 Opus) **전부 `signatureCipher`**, 직접 URL 0, URL 내부 `n` 있음, **`pot` 파라미터 없음**, `playerAttestationRenderer`·attestation 요구 **없음**, DRM 0. `serverAbrStreamingUrl` 있음 + `playerConfig.mediaCommonConfig.useServerDrivenAbr` → web player 기본은 SABR이지만 cipher adaptive format도 아직 함께 제공.
+- **`/player` WEB_SAFARI**: HLS master 제공(muxed avc1+mp4a 6 variant, audio-only 없음). segment URL은 서버가 이미 서명(`sig`, `lsig` 포함) + `n` 포함, `pot` 없음.
+- **HLS 403의 원인 분리**: 같은 segment를 헤더 조합별로 요청 — UA만 / +Origin·Referer(music) / +Origin·Referer(www) / +Range / +계정 Cookie → **전부 HTTP 403**. 요청 context(헤더·cookie)는 원인 아님 → 남은 후보는 **URL의 `n`(미변환)** 또는 서버 측 추가 요구(POT 등) [다음 실험으로만 분리 가능].
+- player JS(`/s/player/fb50cd46/player_es6.vflset/ko_KR/base.js`, 공개, `signatureTimestamp` 20719): 문자열이 전역 string table(`var c="…"`, 85항목: `n`·`sp`·`s`·`signatureCipher`·`/videoplayback` 등)로 간접 참조되고 sig/n 함수가 이름 없이 인덱스 경유로 연결됨. 과거식 regex 추출(`a.split("")…join("")`, `.get("n")`)로는 대상 함수를 특정할 수 없음 [확인]. `n2y`(HLS URL의 `/n/<v>/`를 URL query의 `n`으로 교체) 존재 → HLS도 player가 n을 변환해 붙이는 구조로 보임 [가설].
+- **여기서 중단(보고)**: 다음 분리 실험은 sig/n 변환을 실제 실행해야 한다. 방법별 비용:
+  1. 직접 solver: base.js를 AST로 파싱해 string table·sig·n 함수와 의존성을 추출, JavaScriptCore로 실행. 구현 수일, **player 갱신(대략 주 단위)마다 깨질 수 있음**, 자체 유지.
+  2. 외부 유지 solver 사용: yt-dlp의 EJS solver script(오픈소스, JS)를 macOS probe에서 JavaScriptCore/외부 runtime으로 실행 — **제3자 코드 다운로드·실행이라 사용자 허가 필요**. 1회성 feasibility 실험에는 가장 빠름. production에서는 yt-dlp 릴리스 주기에 의존.
+  3. 페이지(WKWebView) 안의 player가 이미 수행하는 변환을 이용: 함수가 closure 밖에 노출되지 않아 결국 1과 같은 추출 문제. 페이지 동작 변경(hook)은 합의 경계.
+  4. SABR/UMP 구현(googlevideo 프로토콜): 규모 최대, POT 요구 가능성.
+  - 1·2 모두 "sig/n만으로 200인지"를 확정하는 실험. 200이면 native AVPlayer(오디오 itag 141/774 또는 HLS) 경로가 열리고, 403이 계속되면 POT/SABR 쪽 → 그 시점에 다시 중단·보고.
+  - 추가로 확인할 위험: web config가 SABR 우선(`useServerDrivenAbr`)이라 cipher format 제공이 중단될 가능성 [가설].
+
 
 ## 9. 민감정보 / 정리
 

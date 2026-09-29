@@ -17,6 +17,11 @@ public enum AuthMaterial: Sendable {
         }
     }
 
+    /// The cookie line (in memory only), for requests outside InnerTube.
+    public var cookieHeader: String? {
+        if case .cookie(let c, _, _) = self { c } else { nil }
+    }
+
     var visitorID: String? {
         if case .cookie(_, _, let v) = self { v } else { nil }
     }

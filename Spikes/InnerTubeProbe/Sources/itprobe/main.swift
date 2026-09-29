@@ -139,6 +139,10 @@ case "hls":
         let (report, _) = await PlayerProbe.walkHLS(master, userAgent: ClientIdentity.webSafari.userAgent)
         report.forEach { print("  " + $0) }
         if args.contains("--play") { await AVPlaybackTest.run(master, label: id) }
+        if args.contains("--headers") {
+            let lines = await PlayerProbe.segmentHeaderMatrix(master, userAgent: ClientIdentity.webSafari.userAgent, cookie: auth?.cookieHeader)
+            lines.forEach { print("  seg " + $0) }
+        }
     }
 case "authcheck":
     // Same requests anonymous vs. authenticated; only session state and shape are printed.

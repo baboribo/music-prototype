@@ -168,6 +168,36 @@ public enum PlayerProbe {
         return (report, low.url)
     }
 
+    /// One segment of the lowest variant, requested with header variants a browser would send.
+    /// Separates "request context" from URL parameters (n) as the cause of a 403. Status only.
+    public static func segmentHeaderMatrix(_ master: URL, userAgent: String, cookie: String?) async -> [String] {
+        let session = URLSession(configuration: .ephemeral)
+        func get(_ url: URL, _ headers: [String: String]) async -> Int {
+            var r = URLRequest(url: url)
+            for (k, v) in headers { r.setValue(v, forHTTPHeaderField: k) }
+            guard let (_, resp) = try? await session.data(for: r), let h = resp as? HTTPURLResponse else { return -1 }
+            return h.statusCode
+        }
+        let base = ["User-Agent": userAgent]
+        let md = (try? await session.data(from: master))?.0 ?? Data()
+        let lines = String(decoding: md, as: UTF8.self).split(separator: "\n").map(String.init)
+        guard let i = lines.firstIndex(where: { $0.hasPrefix("#EXT-X-STREAM-INF") }), i + 1 < lines.count,
+              let variant = URL(string: lines[i + 1], relativeTo: master)?.absoluteURL,
+              let (pd, _) = try? await session.data(from: variant),
+              let seg = String(decoding: pd, as: UTF8.self).split(separator: "\n").map(String.init)
+                .first(where: { !$0.hasPrefix("#") && !$0.isEmpty }).flatMap({ URL(string: $0, relativeTo: variant)?.absoluteURL })
+        else { return ["no segment"] }
+        var out: [String] = []
+        let variants: [(String, [String: String])] = [
+            ("UA only", base),
+            ("UA + Origin/Referer music", base.merging(["Origin": "https://music.youtube.com", "Referer": "https://music.youtube.com/"]) { a, _ in a }),
+            ("UA + Origin/Referer www", base.merging(["Origin": "https://www.youtube.com", "Referer": "https://www.youtube.com/"]) { a, _ in a }),
+            ("UA + Range", base.merging(["Range": "bytes=0-"]) { a, _ in a }),
+        ] + (cookie.map { [("UA + account Cookie", base.merging(["Cookie": $0]) { a, _ in a })] } ?? [])
+        for (label, headers) in variants { out.append("\(label): HTTP \(await get(seg, headers))") }
+        return out
+    }
+
     /// Fetches the HLS master playlist and reports its audio-only renditions.
     public static func inspectHLS(_ url: URL, userAgent: String) async -> String {
         var r = URLRequest(url: url)

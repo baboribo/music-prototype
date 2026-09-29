@@ -16,7 +16,7 @@ public struct ClientIdentity: Sendable, Hashable {
     public let versionIsGuess: Bool
 
     public static let webRemix = ClientIdentity(
-        label: "WEB_REMIX", name: "WEB_REMIX", version: "1.20260707.12.00", nameID: 67,
+        label: "WEB_REMIX", name: "WEB_REMIX", version: "1.20260927.17.00", nameID: 67,
         host: "music.youtube.com",
         userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         extra: [:], isWeb: true, versionIsGuess: false)
