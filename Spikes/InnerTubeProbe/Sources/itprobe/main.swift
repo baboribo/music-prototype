@@ -144,6 +144,12 @@ case "hls":
             lines.forEach { print("  seg " + $0) }
         }
     }
+case "solve":
+    // solve <videoId> <player base.js path> <solver.mjs> --auth : B2.2 statuses only.
+    let (id, playerPath, solver) = (args[1], args[2], args[3])
+    let (lines, playable) = await SolverExperiment.runReturningURL(transport, videoID: id, playerPath: playerPath, solver: solver)
+    lines.forEach { print($0) }
+    if args.contains("--play"), let playable { await AVPlaybackTest.run(playable, label: "\(id) itag 141 sig+n") }
 case "authcheck":
     // Same requests anonymous vs. authenticated; only session state and shape are printed.
     let authed = anonymous.authenticated(auth)

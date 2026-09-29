@@ -310,7 +310,7 @@ playlistPanelVideoWrapperRenderer
 5. (완료) A7 checkpoint commit.
 6. (완료) A8 Write Actions: 좋아요·앨범/재생목록/믹스 저장·곡 보관함·다시 듣기 고정(A8.1–A8.7). 구독은 (c) 방향으로 미연결.
 7. (완료, 8절 C·C2) 앱 내부 인증/session: Simulator feasibility + 실기기 fresh-store E2E. 남은 항목은 C2 참조.
-8. B2 진행 중: 1차 분리 실험 완료(B2 1차 참조). sig/n 실행 방법(직접 solver vs 외부 solver) 사용자 결정 대기.
+8. B2 feasibility 결론: blocker는 sig/n뿐, 변환 시 200/206·macOS AVPlayer 재생 [확인] (B2 2차). 다음: iPhone 재생 방식(solver 위치) 결정 → background/lock·Now Playing·Remote Commands 등 소단위.
 
 ### C. In-app authentication / session (2026-09-29, `Spikes/WebPlayerSpike` 확장, 본 앱 미연결)
 목표: 사용자가 DevTools로 cookie를 복사하지 않고, 공개 iOS/WebKit API만으로 로그인·유지·만료·재인증·로그아웃. 개발용 `YTM_SESSION_FILE`은 유지.
@@ -386,6 +386,26 @@ spike 구성: `WebPlayerSpike/AuthProbe.swift`(기존 앱·bundle 재사용, 새
   4. SABR/UMP 구현(googlevideo 프로토콜): 규모 최대, POT 요구 가능성.
   - 1·2 모두 "sig/n만으로 200인지"를 확정하는 실험. 200이면 native AVPlayer(오디오 itag 141/774 또는 HLS) 경로가 열리고, 403이 계속되면 POT/SABR 쪽 → 그 시점에 다시 중단·보고.
   - 추가로 확인할 위험: web config가 SABR 우선(`useServerDrivenAbr`)이라 cipher format 제공이 중단될 가능성 [가설].
+
+#### B2 2차: 공개 solver로 sig/n 적용 (2026-09-29, macOS probe 전용, 사용자 승인 — **production 채택 결정 아님**) 
+- solver: `yt-dlp/ejs` **0.8.0**(release 2026-03-17, 이후 solver 변경 없음), `yt.solver.lib.js`(meriyah 6.1.4 + astring 번들) + `yt.solver.core.js`. sha256 core `ca259e4e…2ead`, lib `770831df…1c82`. scratchpad에만 두고 node 26 `vm` context에서 실행. 저장소·본 앱·spike 앱에는 넣지 않음.
+- player JS: `/s/player/fb50cd46/player_es6.vflset/ko_KR/base.js`, `signatureTimestamp` 20719(probe bootstrap의 sts와 일치).
+- probe `solve <videoId> <base.js> <solve.mjs> --auth [--play]`(`SolverExperiment.swift`): `/player`에서 challenge 추출 → node solver에 **stdin/stdout 파이프로만** 전달 → 변환 URL로 요청 → **HTTP 상태·바이트 수만 출력**. URL·서명·n 값은 메모리 밖(로그·dump·파일)에 남기지 않음.
+
+결과 [확인, Premium cookie, 밤편지 ATV `NnRjwEhFU70`]:
+- **B2.1**: solver가 현재 player에서 n·sig 함수를 추출·실행(임의 challenge로 확인, 약 0.35 s). 실제 challenge: n 2/2, sig 4/4 해결, n은 모두 변환되어 값이 바뀜.
+- **B2.2 HLS (WEB_SAFARI)**: segment — 받은 그대로 `n` → **403**; path의 `/n/<v>/`만 변환 값으로 교체 → **HTTP 200, 93,624 B**. (sig·lsig는 서버가 이미 서명)
+- **B2.2 WEB_REMIX audio**: itag 140/141(AAC)·251/774(Opus) 모두 — sig만 적용 → **403**; sig + n → **206**(0–64 KiB), 1.1 MB 지점 range도 **206**.
+- **POT**: 어떤 요청에도 `pot`을 보내지 않았는데 200/206 → 이 Premium session·이 콘텐츠에서는 **PO Token 불필요** [확인]. (yt-dlp 문서의 "Premium은 GVS POT 불필요"와 일치)
+- **SABR**: cipher adaptive URL과 HLS가 SABR 없이 bytes를 줌 → 현재 증거 범위에서 **SABR 전체 구현 불필요** [확인]. 단 web config가 SABR 우선이라 cipher/HLS 제공 중단 위험은 남음 [가설].
+- **결론**: 현재 native playback의 blocker는 **signature + n 변환뿐**이었다 [확인]. DRM·attestation·POT·권한 우회는 필요하지 않았다.
+- **native 재생 smoke test (macOS AVPlayer, muted, itag 141 sig+n URL)** [확인]: ready → 재생 위치가 wall clock과 함께 증가(15 s→14.4, 97 s→96.4), pause 5 s drift 0.00, seek 150 s·10 s 정상, access log 60 requests·8,034 KiB·stall 0, error log 0.
+  - `item.duration`이 **507 s로 보고**(곡 실제 약 253 s, `/next` 길이와 불일치) — itag 141은 fragmented MP4(DASH용)라 AVPlayer의 길이 추정이 틀리는 것으로 보임 [가설]. production에서는 길이를 InnerTube 값으로 쓰거나 HLS/다른 container를 검토.
+- **실기기 iPhone 재생 [미검증]**: solver는 합의대로 macOS probe에서만 실행. iPhone에서 재생하려면 (a) 변환된 signed URL을 기기로 옮기거나(URL이 로그·파일에 남을 위험, IP 바인딩 가능성) (b) solver를 기기(JavaScriptCore)에서 실행해야 함 — 둘 다 이번 범위 밖, 사용자 결정 필요.
+
+production 관점 비용 (판단 재료, 미결정):
+- sig/n 변환은 player JS 갱신마다 따라가야 함: 외부 solver(ejs) 의존이면 yt-dlp 릴리스 주기, 자체 solver면 자체 유지. iOS에서는 JavaScriptCore로 같은 JS 실행 가능 [가설, 미검증].
+- base.js(약 2.6 MB)를 player 버전마다 받아 파싱(node 기준 ~0.35 s) → 캐시 필요.
 
 
 ## 9. 민감정보 / 정리
