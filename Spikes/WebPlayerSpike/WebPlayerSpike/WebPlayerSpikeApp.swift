@@ -22,6 +22,10 @@ struct SpikeRoot: View {
         TabView(selection: $tab) {
             Tab("Auth", systemImage: "person.badge.key", value: "auth") { AuthE2EView() }
             Tab("Player", systemImage: "play", value: "player") { SpikeView() }
+            Tab("Playback", systemImage: "waveform", value: "playback") { PlaybackSmokeView() }
+        }
+        .onAppear {
+            if ProcessInfo.processInfo.environment["SPIKE_AUTOSMOKE"] == "1" { tab = "playback" }
         }
     }
 }
@@ -172,7 +176,7 @@ final class WebController {
     }
 
     /// WEB_REMIX identity used by the app's InnerTube client (yt-dlp master, 2026-09).
-    static let remix = (name: "WEB_REMIX", id: "67", version: "1.20260707.12.00")
+    static let remix = (name: "WEB_REMIX", id: "67", version: "1.20260927.17.00")
 
     /// An artist page, for the official web's own subscribe flow (the user taps it).
     func loadArtist() {

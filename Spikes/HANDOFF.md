@@ -310,7 +310,7 @@ playlistPanelVideoWrapperRenderer
 5. (완료) A7 checkpoint commit.
 6. (완료) A8 Write Actions: 좋아요·앨범/재생목록/믹스 저장·곡 보관함·다시 듣기 고정(A8.1–A8.7). 구독은 (c) 방향으로 미연결.
 7. (완료, 8절 C·C2) 앱 내부 인증/session: Simulator feasibility + 실기기 fresh-store E2E. 남은 항목은 C2 참조.
-8. B2 feasibility 결론: blocker는 sig/n뿐, 변환 시 200/206·macOS AVPlayer 재생 [확인] (B2 2차). 다음: iPhone 재생 방식(solver 위치) 결정 → background/lock·Now Playing·Remote Commands 등 소단위.
+8. B2 feasibility 결론: blocker는 sig/n뿐, 변환 시 200/206, macOS·**iPhone AVPlayer 재생** [확인] (B2 2차). SABR 미구현 결정. 다음: production solver architecture 결정 → background/lock·Now Playing·Remote Commands 등 소단위.
 
 ### C. In-app authentication / session (2026-09-29, `Spikes/WebPlayerSpike` 확장, 본 앱 미연결)
 목표: 사용자가 DevTools로 cookie를 복사하지 않고, 공개 iOS/WebKit API만으로 로그인·유지·만료·재인증·로그아웃. 개발용 `YTM_SESSION_FILE`은 유지.
@@ -401,7 +401,13 @@ spike 구성: `WebPlayerSpike/AuthProbe.swift`(기존 앱·bundle 재사용, 새
 - **결론**: 현재 native playback의 blocker는 **signature + n 변환뿐**이었다 [확인]. DRM·attestation·POT·권한 우회는 필요하지 않았다.
 - **native 재생 smoke test (macOS AVPlayer, muted, itag 141 sig+n URL)** [확인]: ready → 재생 위치가 wall clock과 함께 증가(15 s→14.4, 97 s→96.4), pause 5 s drift 0.00, seek 150 s·10 s 정상, access log 60 requests·8,034 KiB·stall 0, error log 0.
   - `item.duration`이 **507 s로 보고**(곡 실제 약 253 s, `/next` 길이와 불일치) — itag 141은 fragmented MP4(DASH용)라 AVPlayer의 길이 추정이 틀리는 것으로 보임 [가설]. production에서는 길이를 InnerTube 값으로 쓰거나 HLS/다른 container를 검토.
-- **실기기 iPhone 재생 [미검증]**: solver는 합의대로 macOS probe에서만 실행. iPhone에서 재생하려면 (a) 변환된 signed URL을 기기로 옮기거나(URL이 로그·파일에 남을 위험, IP 바인딩 가능성) (b) solver를 기기(JavaScriptCore)에서 실행해야 함 — 둘 다 이번 범위 밖, 사용자 결정 필요.
+- **실기기 iPhone 재생 [확인, 2026-09-29, iPhone 15 Pro Max iOS 27.2]** — 사용자 결정: SABR는 구현하지 않고 direct formats/HLS가 동작하는 동안 이를 primary native path로 사용. iPhone smoke test를 위해 **별도 iOS spike 안에서만 임시로** on-device solver 실행 승인(production solver architecture는 성공 후 다시 결정).
+  - 구성: `WebPlayerSpike` **Playback 탭**(`PlaybackSmoke.swift`). solver 파일은 저장소에 없음 — 실행 시 GitHub release `yt-dlp/ejs` 0.8.0의 lib/core를 받아 **sha256 고정값 검증** 후 앱 Caches에만 저장. 인증은 Auth 탭의 분리 WebKit store(C2에서 로그인한 session). 로그 `Documents/playback.log`는 숫자·상태만.
+  - 흐름: 공개 base.js(`fb50cd46`, sts 20719, 2,609,299 B) → store cookie 26개 + SAPISIDHASH로 native `/player`(WEB_REMIX `1.20260927.17.00`) → HTTP 200, `logged_in=1`, playability OK, adaptive formats 18 → itag 141 `signatureCipher` → **JavaScriptCore(기기)에서 solver 실행 1,965 ms**, n·sig 각 1/1 해결(n 값 변경됨) → range 0–64 KiB **HTTP 206** → `AVPlayer`(오디오 세션 `.playback`, 스피커 출력).
+  - 재생: item ready, `playing`, 위치가 wall clock과 일치(5 s→4.6, 31 s→30.6, 62 s→61.9), 초기 수 초 안에 파일 전체(8,150 KiB, 24 requests) 수신, **stall 0, error 없음**, 60 s 샘플 후 정상 정지.
+  - `item.duration` 506 s(실제 약 253 s, `approxDurationMs`와 불일치) — macOS와 같은 현상 [확인], fragmented MP4 길이 추정 문제로 보임 [가설].
+  - 사용된 session 버그 수정: 식별자 store를 임시 인스턴스로 만들고 바로 놓으면 cookie 조회가 0개를 반환 [확인] → store를 참조로 유지.
+  - 미검증: background/lock, Now Playing, Remote Commands, HLS(n 변환한 playlist를 AVPlayer에 주려면 playlist 재작성/로컬 proxy 필요), Opus(webm) 재생, 곡 길이·seek on device, URL 만료(`expire`, 약 6시간) 처리.
 
 production 관점 비용 (판단 재료, 미결정):
 - sig/n 변환은 player JS 갱신마다 따라가야 함: 외부 solver(ejs) 의존이면 yt-dlp 릴리스 주기, 자체 solver면 자체 유지. iOS에서는 JavaScriptCore로 같은 JS 실행 가능 [가설, 미검증].
