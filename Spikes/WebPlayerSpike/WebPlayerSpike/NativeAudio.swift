@@ -2,32 +2,51 @@ import AVFoundation
 import MediaPlayer
 import SwiftUI
 
-/// Native audio spike: a small queue resolved by `PlaybackResolver`, one AVPlayer, the
-/// system Now Playing / remote commands, and system volume. Logs states and numbers only.
+/// Native audio spike: a queue resolved by `PlaybackResolver`, one (queue) player, next-item
+/// prefetch, the system Now Playing / remote commands, and system volume. Logs states and numbers only.
 @MainActor
 @Observable
 final class NativeAudioPlayer {
-    struct Entry: Identifiable { let id: String; let label: String }
+    struct Entry: Identifiable, Equatable { let id: String; let label: String }
     /// Three ATV tracks this account can play (IDs from earlier /next responses).
-    static let queue = [
+    static let sample = [
         Entry(id: "NnRjwEhFU70", label: "밤편지"),
         Entry(id: "wh7j1uEpNsQ", label: "보라빛 밤"),
         Entry(id: "2C1Jg04INb4", label: "팔레트"),
     ]
+    /// Pink Floyd, The Dark Side of the Moon (MPREb_nHbCAGX6uUL): tracks run into each other.
+    static let album = [
+        Entry(id: "CDko2ux1bkE", label: "1 Speak to Me"),
+        Entry(id: "_396y7Vk9NA", label: "2 Breathe"),
+        Entry(id: "0Qhjiz_Ceu4", label: "3 On the Run"),
+        Entry(id: "80LhtHY_fHw", label: "4 Time"),
+        Entry(id: "hOhTDRdcx4o", label: "5 The Great Gig in the Sky"),
+        Entry(id: "q9NtWkikVAE", label: "6 Money"),
+        Entry(id: "5wth9BScmGY", label: "7 Us and Them"),
+        Entry(id: "e3n4fRYTc94", label: "8 Any Colour You Like"),
+        Entry(id: "Rly0qaXeSPg", label: "9 Brain Damage"),
+        Entry(id: "4wYd-sqzY-k", label: "10 Eclipse"),
+    ]
 
+    /// How the next track takes over: resolve at the boundary (the B3 baseline), a prefetched item
+    /// swapped in with `replaceCurrentItem`, or a prefetched item already queued in `AVQueuePlayer`.
+    enum Transition: String, CaseIterable, Identifiable { case off, replace, queue; var id: String { rawValue } }
+
+    private(set) var queue: [Entry] = NativeAudioPlayer.sample
     private(set) var index = 0
     private(set) var current: ResolvedAudio?
     private(set) var position: Double = 0
     private(set) var isPlaying = false
     private(set) var lines: [String] = []
     private(set) var resolving = false
+    private(set) var transition: Transition = .queue
     /// The listener's intent: a pause during resolution must hold when the item arrives.
     private var wantsPlayback = false
     private(set) var volume: Float = AVAudioSession.sharedInstance().outputVolume
 
     private let resolver = PlaybackResolver(session: WebKitCookieSource(), playerJS: WebPlayerJSProvider(),
                                             solver: JSCSolver(release: .ejs080))
-    private let player = AVPlayer()
+    private let player = AVQueuePlayer()
     private var timeObserver: Any?
     private var observations: [NSKeyValueObservation] = []
     private var tokens: [NSObjectProtocol] = []
@@ -35,13 +54,40 @@ final class NativeAudioPlayer {
     private let file = URL.documentsDirectory.appending(path: "audio.log")
     private var loadTask: Task<Void, Never>?
 
+    /// Every item this player made, with the queue slot and resolution it plays (held strongly,
+    /// so an identifier is never reused while listed). Pruned when an item leaves the player.
+    private struct Loaded { let item: AVPlayerItem; let index: Int; let audio: ResolvedAudio }
+    private var loaded: [ObjectIdentifier: Loaded] = [:]
+    private var itemObservations: [ObjectIdentifier: NSKeyValueObservation] = [:]
+
+    /// The one prepared next track: `/player` → sig/n → URL → item. Keyed by slot and video, so a
+    /// reorder, shuffle or direct selection that changes the expected next drops it.
+    private struct Prefetch {
+        let index: Int
+        let videoID: String
+        var task: Task<Void, Never>?
+        var audio: ResolvedAudio?
+        var item: AVPlayerItem?
+    }
+    private var prefetch: Prefetch?
+    /// A prepared URL is replaced this long before it expires (`expire` is about 6 h out).
+    static let expiryMargin: TimeInterval = 600
+    private(set) var prefetchState = "-"
+
     init() {
         log("launch", ["UIBackgroundModes": Bundle.main.object(forInfoDictionaryKey: "UIBackgroundModes") as? [String] ?? []]
             .merging(sessionState()) { a, _ in a })
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
         timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 1, preferredTimescale: 600), queue: .main) { [weak self] time in
-            MainActor.assumeIsolated { self?.position = time.seconds }
+            MainActor.assumeIsolated {
+                self?.position = time.seconds
+                self?.checkPrefetchExpiry()
+            }
         }
+        // AVQueuePlayer advances on its own; the queue slot and Now Playing follow the item.
+        observations.append(player.observe(\.currentItem, options: [.new]) { [weak self] _, _ in
+            Task { @MainActor in self?.currentItemChanged() }
+        })
         observations.append(player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
             let status = player.timeControlStatus
             MainActor.assumeIsolated {
@@ -123,6 +169,9 @@ final class NativeAudioPlayer {
         tokens.append(center.addObserver(forName: UIApplication.protectedDataDidBecomeAvailableNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.log("app", ["event": "unlocked", "pos": self?.rounded(self?.player.currentTime().seconds) ?? -1]) }
         })
+        if let mode = ProcessInfo.processInfo.environment["SPIKE_MODE"].flatMap(Transition.init(rawValue:)) { transition = mode }
+        player.actionAtItemEnd = Self.endAction(transition)
+        log("mode", ["transition": transition.rawValue])
         registerRemoteCommands()
     }
 
@@ -198,62 +247,255 @@ final class NativeAudioPlayer {
     // MARK: Transport
 
     func play(at index: Int) {
-        guard Self.queue.indices.contains(index) else { return }
+        guard queue.indices.contains(index) else { return }
         self.index = index
         wantsPlayback = true
         loadTask?.cancel()
-        let entry = Self.queue[index]
-        resolving = true
         mark("queueChanged")
-        loadTask = Task {
-            defer { resolving = false }
-            let started = Date()
-            mark("resolveStart")
-            do {
-                let resolved = try await resolver.resolve(entry.id)
+        loadTask = Task { await load(index) }
+    }
+
+    /// Plays a queue slot: the prefetched item when it is for this slot (waiting for it if it is
+    /// still resolving), otherwise a fresh resolution.
+    private func load(_ index: Int) async {
+        let entry = queue[index]
+        if let pending = prefetch, pending.index == index, pending.videoID == entry.id {
+            if pending.audio == nil {
+                mark("prefetchWait")
+                await pending.task?.value
                 guard !Task.isCancelled else { return }
-                current = resolved
-                mark("resolveDone")
-                log("resolved", ["index": index, "track": entry.label, "itag": resolved.itag,
-                                 "ms": Int(Date().timeIntervalSince(started) * 1000), "phases": resolved.timings,
-                                 "duration": rounded(resolved.duration), "expiresInMin": resolved.expiresAt.map { Int($0.timeIntervalSinceNow / 60) } ?? -1])
-                activateSession("play")
-                let item = AVPlayerItem(url: resolved.url)
-                // These fragmented MP4s carry the full length in mvhd as well as in their fragments;
-                // AVPlayer adds both (2× duration) and would only end at twice the real length.
-                // Ending the item at the service's length restores didPlayToEndTime.
-                if let duration = resolved.duration {
-                    item.forwardPlaybackEndTime = CMTime(seconds: duration, preferredTimescale: 44_100)
+            }
+            if let ready = prefetch, ready.index == index, ready.videoID == entry.id, let audio = ready.audio, let item = ready.item {
+                if isFresh(audio, for: 120) {
+                    prefetch = nil
+                    mark("prefetchHit")
+                    log("prefetch", ["step": "used", "index": index, "track": entry.label])
+                    start(item)
+                    return
                 }
-                player.replaceCurrentItem(with: item)
-                if wantsPlayback { player.play() }
-                artwork = nil
-                updateNowPlaying()
-                loadArtwork(resolved.artworkURL)
-                observeDuration(item)
-            } catch {
-                log("resolveFailed", ["index": index, "error": "\(error)", "cancelled": Task.isCancelled])
+                discardPrefetch("expired at use")
+            }
+        }
+        if prefetch != nil { discardPrefetch("selection is not the prepared next") }
+        resolving = true
+        defer { resolving = false }
+        let started = Date()
+        mark("resolveStart")
+        do {
+            let resolved = try await resolver.resolve(entry.id)
+            guard !Task.isCancelled else { return }
+            mark("resolveDone")
+            log("resolved", ["index": index, "track": entry.label, "itag": resolved.itag,
+                             "ms": Int(Date().timeIntervalSince(started) * 1000), "phases": resolved.timings,
+                             "duration": rounded(resolved.duration), "expiresInMin": resolved.expiresAt.map { Int($0.timeIntervalSinceNow / 60) } ?? -1])
+            start(makeItem(resolved, index: index))
+        } catch {
+            log("resolveFailed", ["index": index, "error": "\(error)", "cancelled": Task.isCancelled])
+        }
+    }
+
+    private func makeItem(_ audio: ResolvedAudio, index: Int) -> AVPlayerItem {
+        let item = AVPlayerItem(url: audio.url)
+        // These fragmented MP4s carry the full length in mvhd as well as in their fragments;
+        // AVPlayer adds both (2× duration) and would only end at twice the real length.
+        // Ending the item at the service's length restores didPlayToEndTime.
+        if let duration = audio.duration {
+            item.forwardPlaybackEndTime = CMTime(seconds: duration, preferredTimescale: 44_100)
+        }
+        loaded[ObjectIdentifier(item)] = Loaded(item: item, index: index, audio: audio)
+        observeStatus(item)
+        return item
+    }
+
+    /// Makes `item` current. `currentItemChanged` then updates the slot, Now Playing and prefetch.
+    private func start(_ item: AVPlayerItem) {
+        activateSession("play")
+        switch transition {
+        case .queue:
+            let items = player.items()
+            if items.count > 1, items[1] === item {
+                player.advanceToNextItem()
+            } else {
+                player.removeAllItems()
+                player.insert(item, after: nil)
+            }
+        case .replace, .off:
+            player.replaceCurrentItem(with: item)
+        }
+        if wantsPlayback { player.play() }
+    }
+
+    private func currentItemChanged() {
+        guard let item = player.currentItem, let info = loaded[ObjectIdentifier(item)] else { return }
+        let changed = current?.videoID != info.audio.videoID || index != info.index
+        index = info.index
+        current = info.audio
+        if prefetch?.item === item { prefetch = nil }
+        pruneItems()
+        if changed {
+            log("current", ["index": info.index, "track": queue.indices.contains(info.index) ? queue[info.index].label : "?", "queued": player.items().count - 1])
+            artwork = nil
+            updateNowPlaying()
+            loadArtwork(info.audio.artworkURL)
+        }
+        schedulePrefetch()
+    }
+
+    /// Drops bookkeeping for items that are neither in the player nor prefetched.
+    private func pruneItems() {
+        let live = Set(player.items().map(ObjectIdentifier.init)).union(prefetch?.item.map { [ObjectIdentifier($0)] } ?? [])
+        for id in loaded.keys where !live.contains(id) {
+            loaded[id] = nil
+            itemObservations[id] = nil
+        }
+    }
+
+    private func observeStatus(_ item: AVPlayerItem) {
+        let id = ObjectIdentifier(item)
+        itemObservations[id] = item.observe(\.status, options: [.new]) { [weak self] item, _ in
+            let status = item.status
+            let duration = item.duration.seconds
+            MainActor.assumeIsolated {
+                guard let self, status == .readyToPlay else { return }
+                let role = self.player.currentItem.map(ObjectIdentifier.init) == id ? "current" : (self.player.items().contains { ObjectIdentifier($0) == id } ? "queued" : "detached")
+                if role == "current" { self.mark("itemReady") }
+                self.log("itemReady", ["role": role, "index": self.loaded[id]?.index ?? -1,
+                                       "avDuration": self.rounded(duration.isFinite ? duration : -1),
+                                       "serviceDuration": self.rounded(self.loaded[id]?.audio.duration)])
             }
         }
     }
 
-    private func observeDuration(_ item: AVPlayerItem) {
-        observations.append(item.observe(\.status, options: [.new]) { [weak self] item, _ in
-            let status = item.status
-            let duration = item.duration.seconds
-            MainActor.assumeIsolated {
-                guard status == .readyToPlay else { return }
-                self?.mark("itemReady")
-                self?.log("itemReady", ["avDuration": self?.rounded(duration.isFinite ? duration : -1) ?? -1,
-                                        "serviceDuration": self?.rounded(self?.current?.duration) ?? -1])
+    // MARK: Prefetch (next item only)
+
+    private var nextIndex: Int? { queue.isEmpty ? nil : (index + 1) % queue.count }
+
+    /// Keeps exactly the expected next track prepared; anything else is dropped.
+    private func schedulePrefetch() {
+        guard transition != .off, current != nil, let next = nextIndex else { return }
+        let entry = queue[next]
+        if let p = prefetch {
+            if p.index == next, p.videoID == entry.id { return }
+            discardPrefetch("expected next changed")
+        }
+        var p = Prefetch(index: next, videoID: entry.id)
+        p.task = Task { await runPrefetch(next, entry) }
+        prefetch = p
+        prefetchState = "resolving \(entry.label)"
+    }
+
+    private func runPrefetch(_ index: Int, _ entry: Entry) async {
+        let started = Date()
+        log("prefetch", ["step": "start", "index": index, "track": entry.label])
+        do {
+            let audio = try await resolver.resolve(entry.id)
+            guard !Task.isCancelled, prefetch?.index == index, prefetch?.videoID == entry.id else {
+                log("prefetch", ["step": "late result dropped", "index": index])
+                return
             }
-        })
+            let item = makeItem(audio, index: index)
+            prefetch?.audio = audio
+            prefetch?.item = item
+            log("prefetch", ["step": "resolved", "index": index, "ms": Int(Date().timeIntervalSince(started) * 1000),
+                             "phases": audio.timings, "expiresInMin": audio.expiresAt.map { Int($0.timeIntervalSinceNow / 60) } ?? -1])
+            switch transition {
+            case .queue:
+                // Queued behind the current item: AVQueuePlayer buffers it and advances without a gap in our code.
+                if let currentItem = player.currentItem, player.canInsert(item, after: currentItem) {
+                    player.insert(item, after: currentItem)
+                    prefetchState = "queued \(entry.label)"
+                    log("prefetch", ["step": "queued", "index": index])
+                }
+            case .replace:
+                // A detached item cannot buffer; load the asset's header so the swap has less to do.
+                let assetStart = Date()
+                _ = try? await item.asset.load(.tracks, .duration)
+                prefetchState = "ready \(entry.label)"
+                log("prefetch", ["step": "assetLoaded", "index": index, "ms": Int(Date().timeIntervalSince(assetStart) * 1000)])
+            case .off:
+                break
+            }
+        } catch {
+            log("prefetch", ["step": "failed", "index": index, "error": "\(error)", "cancelled": Task.isCancelled])
+            if prefetch?.index == index, prefetch?.videoID == entry.id { prefetch = nil; prefetchState = "failed" }
+        }
+    }
+
+    private func discardPrefetch(_ reason: String) {
+        guard let p = prefetch else { return }
+        p.task?.cancel()
+        if let item = p.item, item !== player.currentItem, player.items().contains(item) { player.remove(item) }
+        prefetch = nil
+        prefetchState = "-"
+        pruneItems()
+        log("prefetch", ["step": "discarded", "reason": reason, "index": p.index, "hadItem": p.item != nil])
+    }
+
+    /// Test hook: pretend this many seconds have passed when judging URL expiry.
+    private var expirySkew: TimeInterval = 0
+
+    private func isFresh(_ audio: ResolvedAudio, for seconds: TimeInterval) -> Bool {
+        guard let expires = audio.expiresAt else { return true }
+        return expires.timeIntervalSinceNow - expirySkew > seconds
+    }
+
+    /// A prepared URL close to expiry is replaced by a new resolution (checked each playback second and on resume).
+    private func checkPrefetchExpiry() {
+        guard let audio = prefetch?.audio, !isFresh(audio, for: Self.expiryMargin) else { return }
+        discardPrefetch("expiring")
+        schedulePrefetch()
+    }
+
+    func simulateExpiry(_ seconds: TimeInterval) {
+        expirySkew = seconds
+        checkPrefetchExpiry()
+        expirySkew = 0
+    }
+
+    /// Only the queue mode lets the player advance by itself. Otherwise the player must hold at the end:
+    /// with `.advance`, AVQueuePlayer's own advance removed an item swapped in from the end notification.
+    private static func endAction(_ mode: Transition) -> AVPlayer.ActionAtItemEnd { mode == .queue ? .advance : .pause }
+
+    // MARK: Queue edits (each re-checks the expected next)
+
+    func setQueue(_ entries: [Entry]) {
+        discardPrefetch("queue replaced")
+        queue = entries
+        index = 0
+        log("queueEdit", ["op": "replace", "count": entries.count])
+    }
+
+    func setTransition(_ mode: Transition) {
+        guard mode != transition else { return }
+        discardPrefetch("transition mode changed")
+        transition = mode
+        player.actionAtItemEnd = Self.endAction(mode)
+        log("mode", ["transition": mode.rawValue])
+        schedulePrefetch()
+    }
+
+    func shuffleUpcoming(reversed: Bool = false) {
+        guard index + 1 < queue.count else { return }
+        let upcoming = Array(queue[(index + 1)...])
+        queue.replaceSubrange((index + 1)..., with: reversed ? upcoming.reversed() : upcoming.shuffled())
+        log("queueEdit", ["op": reversed ? "reverseUpcoming" : "shuffleUpcoming", "next": queue[nextIndex ?? 0].label])
+        schedulePrefetch()
+    }
+
+    /// Reorders two upcoming slots (offsets from the current slot).
+    func swapUpcoming(_ a: Int, _ b: Int) {
+        let (i, j) = (index + a, index + b)
+        guard queue.indices.contains(i), queue.indices.contains(j) else { return }
+        queue.swapAt(i, j)
+        log("queueEdit", ["op": "swap +\(a) +\(b)", "next": queue[nextIndex ?? 0].label])
+        schedulePrefetch()
     }
 
     func pause(_ source: String = "app") { wantsPlayback = false; player.pause(); log("cmd", ["pause": rounded(player.currentTime().seconds), "source": source]) }
     func resume(_ source: String = "app") {
         wantsPlayback = true
         activateSession("resume")
+        checkPrefetchExpiry()
         player.play()
         log("cmd", ["resume": rounded(player.currentTime().seconds), "source": source].merging(playerState()) { a, _ in a })
     }
@@ -267,7 +509,7 @@ final class NativeAudioPlayer {
         updateNowPlaying()
     }
 
-    func next() { log("cmd", ["next": index + 1]); play(at: (index + 1) % Self.queue.count) }
+    func next() { log("cmd", ["next": nextIndex ?? -1]); nextIndex.map(play(at:)) }
 
     /// Starts a latency chain for a command (remote or in-app).
     func beginCommand(_ name: String) { commandStart = Date(); log("latency", ["step": "command \(name)", "ms": 0]) }
@@ -279,15 +521,44 @@ final class NativeAudioPlayer {
             Task { await seek(to: 0) }
         } else {
             log("cmd", ["previous": index - 1])
-            play(at: (index - 1 + Self.queue.count) % Self.queue.count)
+            play(at: (index - 1 + queue.count) % queue.count)
         }
     }
 
     private func itemEnded(_ id: ObjectIdentifier) {
-        guard let item = player.currentItem, ObjectIdentifier(item) == id else { return }
-        log("ended", ["pos": rounded(item.currentTime().seconds), "serviceDuration": rounded(current?.duration),
-                      "avDuration": rounded(item.duration.seconds.isFinite ? item.duration.seconds : -1)])
+        // AVQueuePlayer may already have advanced when this arrives: match by our own records.
+        guard let ended = loaded[id], ended.index == index else { return }
+        let nextItem = prefetch?.item
+        log("ended", ["index": ended.index, "pos": rounded(ended.item.currentTime().seconds), "serviceDuration": rounded(ended.audio.duration),
+                      "transition": transition.rawValue, "prefetch": prefetchState,
+                      "nextStatus": nextItem.map { $0.status == .readyToPlay ? "ready" : ($0.status == .failed ? "failed" : "unknown") } ?? "none",
+                      "nextBuffered": rounded(nextItem?.loadedTimeRanges.last.map { $0.timeRangeValue.end.seconds })])
+        beginCommand("auto")
+        measureGap(after: id)
+        if transition == .queue, player.items().contains(where: { ObjectIdentifier($0) != id }) { return }  // advancing by itself
+        if transition == .queue { log("prefetch", ["step": "miss at end", "state": prefetchState]) }
         next()
+    }
+
+    /// Estimates the silence between tracks: when the new item's time 0 played, relative to the end
+    /// notification (observed wall time minus the new item's position). Log-based; the ear decides.
+    private func measureGap(after ended: ObjectIdentifier) {
+        let endedAt = Date()
+        Task {
+            while Date().timeIntervalSince(endedAt) < 10 {
+                if let item = player.currentItem, ObjectIdentifier(item) != ended, player.timeControlStatus == .playing {
+                    let pos = item.currentTime().seconds
+                    if pos.isFinite, pos > 0 {
+                        let observed = Date().timeIntervalSince(endedAt)
+                        log("gap", ["transition": transition.rawValue, "to": index, "observedMs": Int(observed * 1000),
+                                    "newPos": rounded(pos), "estimatedGapMs": Int((observed - pos) * 1000)])
+                        return
+                    }
+                }
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+            log("gap", ["transition": transition.rawValue, "timeout": true])
+        }
     }
 
     // MARK: Now Playing and remote commands
@@ -417,6 +688,55 @@ final class NativeAudioPlayer {
         log("latencyTest", ["step": "done"])
     }
 
+    // MARK: Boundary test on a continuous album, SPIKE_GAPTEST=1 (SPIKE_MODE=off|replace|queue)
+
+    /// Plays the last seconds before three album boundaries, and exercises prefetch invalidation
+    /// (reorders, a direct selection, simulated expiry) in between.
+    func gapTest() async {
+        log("gapTest", ["step": "start", "transition": transition.rawValue])
+        setQueue(Self.album)
+        beginCommand("first play")
+        play(at: 0)
+        _ = await waitUntil(30, { self.isPlaying && self.player.currentTime().seconds > 1 })
+        await boundary(from: 0)   // Speak to Me → Breathe
+        await boundary(from: 1)   // Breathe → On the Run
+
+        // Invalidation: a reorder that changes the expected next drops it; one that keeps it does not.
+        shuffleUpcoming(reversed: true)   // next becomes Eclipse
+        try? await Task.sleep(for: .seconds(2))
+        shuffleUpcoming(reversed: true)   // back to Time
+        try? await Task.sleep(for: .seconds(2))
+        swapUpcoming(2, 3)                // next unchanged
+        swapUpcoming(2, 3)
+        _ = await waitUntil(15, { self.prefetch?.audio != nil })
+        simulateExpiry(6 * 3600)          // prepared URL treated as expiring → replaced
+        _ = await waitUntil(15, { self.prefetch?.audio != nil })
+
+        // Direct selection of a slot that is not the prepared next.
+        beginCommand("select 9")
+        play(at: 8)
+        _ = await waitUntil(20, { self.playingSlot == 8 && self.player.currentTime().seconds > 1 })
+        await boundary(from: 8)   // Brain Damage → Eclipse
+        pause()
+        log("gapTest", ["step": "done"])
+    }
+
+    /// Seeks to 6 s before the end of `slot` (once the next is prepared) and waits into the next track.
+    private func boundary(from slot: Int) async {
+        _ = await waitUntil(20, { self.playingSlot == slot })
+        if transition != .off { _ = await waitUntil(20, { self.prefetch?.audio != nil && self.prefetchState.hasPrefix(self.transition == .queue ? "queued" : "ready") }) }
+        let duration = player.currentItem.flatMap { loaded[ObjectIdentifier($0)]?.audio.duration } ?? 0
+        await seek(to: duration - 6)
+        log("gapTest", ["step": "boundary", "from": slot, "prefetch": prefetchState])
+        _ = await waitUntil(25, { self.playingSlot == slot + 1 && self.player.currentTime().seconds > 4 })
+    }
+
+    /// The queue slot of the item actually playing (`index` moves as soon as a command arrives).
+    private var playingSlot: Int? {
+        guard player.timeControlStatus == .playing, let item = player.currentItem else { return nil }
+        return loaded[ObjectIdentifier(item)]?.index
+    }
+
     private func waitUntil(_ seconds: Double, _ condition: @escaping @MainActor () -> Bool) async -> Bool {
         let deadline = Date().addingTimeInterval(seconds)
         while Date() < deadline {
@@ -443,9 +763,19 @@ struct NativeAudioView: View {
                 Button("⏭") { audio.beginCommand("next(app)"); audio.next() }
                 Button("-10") { Task { await audio.seek(to: audio.position - 10) } }
                 Button("+30") { Task { await audio.seek(to: audio.position + 30) } }
-                Button("End-8") { Task { await audio.seek(to: (audio.current?.duration ?? 0) - 8) } }
             }
             .buttonStyle(.bordered)
+            Picker("Transition", selection: Binding(get: { audio.transition }, set: { audio.setTransition($0) })) {
+                ForEach(NativeAudioPlayer.Transition.allCases) { Text($0.rawValue).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            HStack {
+                Button("Album") { audio.setQueue(NativeAudioPlayer.album); audio.play(at: 0) }
+                Button("Shuffle next") { audio.shuffleUpcoming() }
+                Button("End-6") { Task { await audio.seek(to: (audio.current?.duration ?? 0) - 6) } }
+            }
+            .buttonStyle(.bordered)
+            Text("\(audio.index + 1)/\(audio.queue.count) · next: \(audio.prefetchState)").font(.caption.monospaced())
             // The system volume slider (hardware buttons move it too).
             SystemVolumeSlider().frame(height: 34)
             Text(String(format: "outputVolume %.2f", audio.volume)).font(.caption.monospaced())
@@ -466,6 +796,7 @@ struct NativeAudioView: View {
         .task {
             if ProcessInfo.processInfo.environment["SPIKE_AUDIOTEST"] == "1" { await audio.scriptedTest() }
             if ProcessInfo.processInfo.environment["SPIKE_LATENCYTEST"] == "1" { await audio.latencyTest() }
+            if ProcessInfo.processInfo.environment["SPIKE_GAPTEST"] == "1" { await audio.gapTest() }
         }
     }
 }

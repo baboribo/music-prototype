@@ -151,6 +151,53 @@ case "solve":
     lines.forEach { print($0) }
     if args.contains("--play"), let playable { await AVPlaybackTest.run(playable, label: "\(id) itag 141 sig+n") }
     if args.contains("--mp4"), let playable { (await MP4Header.describe(playable)).forEach { print("  mp4 " + $0) } }
+case "pcm":
+    // pcm <idA> <idB> <base.js> <solve.mjs> --auth : gapless boundary A→B in decoded PCM (numbers only).
+    let (idA, idB, playerPath, solver) = (args[1], args[2], args[3], args[4])
+    func fetch(_ id: String) async -> (Data, Int?)? {
+        let service = try? await PlayerProbe.request(transport, client: .webRemix, videoID: id).0.json?
+            .at("streamingData.adaptiveFormats")?.array.first { $0["itag"]?.number == 141 }?["approxDurationMs"]?.string.flatMap(Int.init)
+        guard let url = await SolverExperiment.runReturningURL(transport, videoID: id, playerPath: playerPath, solver: solver).playable else { return nil }
+        var data = Data(), total = Int.max
+        let session = URLSession(configuration: .ephemeral)
+        while data.count < total {
+            var r = URLRequest(url: url)
+            r.setValue(ClientIdentity.webRemix.userAgent, forHTTPHeaderField: "User-Agent")
+            r.setValue("bytes=\(data.count)-\(min(total, data.count + 2_000_000) - 1)", forHTTPHeaderField: "Range")
+            guard let (chunk, resp) = try? await session.data(for: r), let h = resp as? HTTPURLResponse, h.statusCode == 206, !chunk.isEmpty else { return nil }
+            if let range = h.value(forHTTPHeaderField: "Content-Range"), let t = range.split(separator: "/").last.flatMap({ Int($0) }) { total = t }
+            data.append(chunk)
+        }
+        return (data, service)
+    }
+    guard let (bytesA, msA) = await fetch(idA), let (bytesB, msB) = await fetch(idB) else { print("download failed"); break }
+    let a = PCMBoundary.parse(bytesA), b = PCMBoundary.parse(bytesB)
+    let pcmA = try PCMBoundary.decode(a), pcmB = try PCMBoundary.decode(b)
+    func reader(_ bytes: Data, _ name: String) async throws -> [[Float]] {
+        let file = outDir.appendingPathComponent("pcm-tmp-\(name).mp4")
+        try bytes.write(to: file)
+        defer { try? FileManager.default.removeItem(at: file) }
+        try await PCMBoundary.timeline(file, timescale: 44100).forEach { print("\(name.uppercased()) \($0)") }
+        return try await PCMBoundary.readerPCM(file)
+    }
+    let readerA = try await reader(bytesA, "a"), readerB = try await reader(bytesB, "b")
+    if args.contains("--edit-variants") {
+        // Where does AVFoundation start when the edit list differs? (start in raw decoded samples)
+        for (label, mediaTime) in [("elst media_time 0", Optional(0)), ("elst media_time 512", 512), ("elst media_time 3712", 3712), ("no edts", nil)] {
+            let pcm = try await reader(PCMBoundary.patched(bytesA, mediaTime: mediaTime), "v")
+            let start = PCMBoundary.alignStart(pcmA[0], pcm[0])
+            print("variant \(label): reader \(pcm[0].count) samples, starts at raw \(start.0) (err \(String(format: "%.6f", start.1)))")
+        }
+        let padding = a.frames.count * 1024 - a.elstMediaTime - a.elstSegment
+        for (label, bytes) in [("iTunSMPB 1600/\(padding) + elst", PCMBoundary.withSMPB(bytesA, priming: 1600, padding: padding, samples: a.elstSegment)),
+                               ("iTunSMPB 1600/\(padding), no edts", PCMBoundary.withSMPB(PCMBoundary.patched(bytesA, mediaTime: nil), priming: 1600, padding: padding, samples: a.elstSegment))] {
+            let pcm = try await reader(bytes, "v")
+            let start = PCMBoundary.alignStart(pcmA[0], pcm[0])
+            let end = start.0 + pcm[0].count
+            print("variant \(label): reader \(pcm[0].count) samples, starts at raw \(start.0) (err \(String(format: "%.6f", start.1))), ends at raw \(end) vs elst end \(a.elstMediaTime + a.elstSegment)")
+        }
+    }
+    PCMBoundary.report(a, b, pcmA: pcmA, pcmB: pcmB, readerA: readerA, readerB: readerB, serviceMsA: msA, serviceMsB: msB, label: "\(idA)→\(idB)").forEach { print($0) }
 case "authcheck":
     // Same requests anonymous vs. authenticated; only session state and shape are printed.
     let authed = anonymous.authenticated(auth)

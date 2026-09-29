@@ -96,9 +96,8 @@ actor PlaybackResolver {
         self.solver = solver
     }
 
-    private var phase: [String: Int] = [:]
-
-    private func timed<T>(_ name: String, _ body: () async throws -> T) async rethrows -> T {
+    /// Per-call timings: resolves can overlap (the current track and a prefetch), so no shared state.
+    private func timed<T>(_ name: String, _ phase: inout [String: Int], _ body: () async throws -> T) async rethrows -> T {
         let start = ContinuousClock.now
         defer {
             let elapsed = ContinuousClock.now - start
@@ -108,9 +107,9 @@ actor PlaybackResolver {
     }
 
     func resolve(_ videoID: String) async throws -> ResolvedAudio {
-        phase = [:]
-        let player = try await timed("playerJS") { try await playerJS.current() }
-        let root = try await timed("player") { try await playerResponse(videoID, sts: player.signatureTimestamp) }
+        var phase: [String: Int] = [:]
+        let player = try await timed("playerJS", &phase) { try await playerJS.current() }
+        let root = try await timed("player", &phase) { try await playerResponse(videoID, sts: player.signatureTimestamp) }
         let playability = root.dict("playabilityStatus")
         guard playability?["status"] as? String == "OK" else {
             throw ResolutionError.unplayable(playability?["status"] as? String ?? "?")
@@ -136,7 +135,7 @@ actor PlaybackResolver {
             throw ResolutionError.noAudioFormat
         }
         let n = comps.queryItems?.first { $0.name == "n" }?.value
-        let solved = try await timed("solve") {
+        let solved = try await timed("solve", &phase) {
             try await solver.solve(player, n: n.map { [$0] } ?? [], sig: sig.map { [$0.s] } ?? [])
         }
         for (key, value) in solved.diagnostics { phase["solver." + key] = value }
@@ -150,7 +149,7 @@ actor PlaybackResolver {
         }
         guard let url = comps.url else { throw ResolutionError.malformed("url") }
         // A wrong transform shows up as 403 here, before the player sees the URL.
-        let status = await timed("probe") { await Self.probe(url) }
+        let status = await timed("probe", &phase) { await Self.probe(url) }
         guard status == 206 || status == 200 else { throw ResolutionError.unreachable(status) }
 
         let details = root.dict("videoDetails")
@@ -382,6 +381,8 @@ actor JSCSolver: SignatureSolver {
     private func readyContext() async throws -> JSContext {
         if let context { return context }
         let sources = try await load()
+        // Another solve may have finished loading while this one waited.
+        if let context { return context }
         guard let context = JSContext() else { throw ResolutionError.solverFailed("JSContext") }
         var exception: String?
         context.exceptionHandler = { _, value in exception = value?.toString() }

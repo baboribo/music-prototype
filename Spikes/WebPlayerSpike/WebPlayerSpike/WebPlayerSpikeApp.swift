@@ -26,7 +26,7 @@ struct SpikeRoot: View {
         }
         .onAppear {
             let env = ProcessInfo.processInfo.environment
-            if env["SPIKE_AUDIOTEST"] == "1" || env["SPIKE_LATENCYTEST"] == "1" { tab = "audio" }
+            if env["SPIKE_AUDIOTEST"] == "1" || env["SPIKE_LATENCYTEST"] == "1" || env["SPIKE_GAPTEST"] == "1" { tab = "audio" }
         }
     }
 }

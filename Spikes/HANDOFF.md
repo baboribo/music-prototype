@@ -311,7 +311,7 @@ playlistPanelVideoWrapperRenderer
 6. (완료) A8 Write Actions: 좋아요·앨범/재생목록/믹스 저장·곡 보관함·다시 듣기 고정(A8.1–A8.7). 구독은 (c) 방향으로 미연결.
 7. (완료, 8절 C·C2) 앱 내부 인증/session: Simulator feasibility + 실기기 fresh-store E2E. 남은 항목은 C2 참조.
 8. B2 feasibility 결론: blocker는 sig/n뿐, 변환 시 200/206, macOS·**iPhone AVPlayer 재생** [확인] (B2 2차). SABR 미구현 결정.
-9. B3 native audio 1–8단계 [확인] (B3). B3.1 전환 지연 4.3–4.9 s → 0.6–1.2 s [확인]. 다음: prefetch(+앨범 gapless 기반) 별도 단계. Video/HLS/Song↔Video는 audio 안정화 후.
+9. B3 native audio 1–8단계 [확인] (B3). B3.1 전환 지연 4.3–4.9 s → 0.6–1.2 s [확인]. B3.2 prefetch + AVQueuePlayer: 경계 무음 ≈0, 수동 Next ~0.02–0.15 s [확인]; 남은 경계 틱 = AVFoundation의 priming 이중 trim(+2112) [확인], `iTunSMPB` 재작성 후보 [macOS 확인, 재생 미검증]. Video/HLS/Song↔Video는 audio 안정화 후.
 
 ### C. In-app authentication / session (2026-09-29, `Spikes/WebPlayerSpike` 확장, 본 앱 미연결)
 목표: 사용자가 DevTools로 cookie를 복사하지 않고, 공개 iOS/WebKit API만으로 로그인·유지·만료·재인증·로그아웃. 개발용 `YTM_SESSION_FILE`은 유지.
@@ -456,9 +456,43 @@ spike 구성: `WebPlayerSpike/AuthProbe.swift`(기존 앱·bundle 재사용, 새
 - 남은 비중: `/player` network(~0.3–0.5 s) + AVPlayerItem 준비(~0.25–0.5 s). cold의 player JS 1.2 s는 앱 시작마다 music.youtube.com HTML로 player 버전을 확인하는 비용(버전 확인 주기·재사용으로 줄일 여지) [미개선].
 - 로그상 `timeControl=playing`이 item ready 전에 한 번 찍히는 경우가 있음(rate 설정 직후) — 실제 소리 시작은 item ready 뒤의 `playing` 기준으로 봄.
 
-#### 다음 단계 요구사항 (기록만, 미구현)
-- **Prefetch(다음 곡 미리 resolve)**: 수동·자동 Next 지연 감소가 목표. 여기에 더해 **트랙 경계가 이어지는 앨범의 gapless/continuous playback 기반 확보**도 목표에 포함(사용자 요구). 현재 자동 Next는 곡 끝에서 resolve를 시작해 곡 사이 무음 발생(B3).
-- 고려할 점(설계 시): URL 유효시간(`expire` 약 6 h), queue 변경·셔플·곡 전환 시 무효화, `/player` 추가 요청 수, AVQueuePlayer 또는 다음 item 미리 준비 여부, 이 MP4들의 2배 duration 처리(`forwardPlaybackEndTime`)와 gapless의 상호작용, AAC priming(elst media_time 1600) 처리.
+#### B3.2 Next-item prefetch와 gapless 경계 (2026-09-29, iPhone 15 Pro Max iOS 27.2 + macOS 분석) [확인]
+사용자 요구: Next latency 감소 + **연속 트랙 앨범의 gapless/continuous playback 기반**. 다음 곡 1개만 prefetch, 전체 queue resolve 금지, reorder/shuffle/직접 선택 시 폐기, URL 만료(약 6 h) 고려, 이런 앨범에 crossfade 금지.
+
+구현(`NativeAudio.swift`, spike 전용):
+- 플레이어는 `AVQueuePlayer` 1개. 곡 경계 방식 3가지(Audio 탭 segmented, env `SPIKE_MODE`): `off`(B3 기준: 끝난 뒤 resolve), `replace`(prefetch 후 끝에서 `replaceCurrentItem`, **비교용 실험 모드**), **`queue`(기준 방식: prefetch한 item을 현재 item 뒤에 `insert` → AVQueuePlayer가 스스로 advance)**.
+- `Prefetch{index, videoID, task, audio, item}`: 현재 item이 current가 되면 기대 next(`(index+1) % count`)를 `/player → sig/n → probe → AVPlayerItem`까지 준비. 키는 slot+videoID. 다음이 바뀌는 reorder/shuffle·다른 곡 직접 선택·queue 교체·모드 변경 → 폐기(queue 모드면 AVQueuePlayer에서 제거). next가 그대로인 reorder는 유지. 준비 중에 Next를 누르면 새로 resolve하지 않고 그 작업을 기다림.
+- 만료: 재생 1초마다·resume 시 준비된 URL이 만료 10분 이내면 폐기 후 재준비, 사용 시 120 s 미만이면 쓰지 않음. 현재 곡 URL의 장시간 pause 후 만료는 미처리.
+- `PlaybackResolver`: 단계별 timing을 호출 지역 변수로 변경(현재 곡과 prefetch resolve가 겹칠 때 actor 상태 공유 문제). `JSCSolver`: 동시 첫 호출이 context를 두 번 만들지 않도록 load 후 재확인.
+- 버그 [확인]: `actionAtItemEnd = .advance`에서 replace 방식은 끝 알림에서 넣은 item을 AVQueuePlayer가 스스로 advance하며 제거(`WithNoItemToPlayReason`, 재생 멈춤) → queue 모드만 `.advance`, 나머지 `.pause`.
+
+측정 (자동 `SPIKE_GAPTEST`: Pink Floyd *The Dark Side of the Moon* `MPREb_nHbCAGX6uUL`, 1→2·2→3·9→10 경계, 끝 6초 전 seek; 로그 추정 = 끝 알림 시각 − 새 item 위치):
+| 방식 | 경계 무음(로그) | 비고 |
+|---|---|---|
+| off | 1.06–1.42 s | 끝난 뒤 resolve |
+| replace | 0.19–0.20 s | 떨어져 있는 item은 버퍼링 불가 → 교체 후 준비 시간 |
+| **queue** | **≈0**(6회) | 끝 전에 다음 파일 전체 버퍼됨, 끝 알림 시 새 곡 이미 0.1 s |
+- prefetch resolve 370–890 ms(`/player` 320–780 + solver 5–20 ms, 메모리 전처리 경로), 곡 시작 직후 수행.
+- 수동 Next(queue, prefetch 적중): `playing` 17–27 ms, item ready 128–149 ms (B3.1 0.63–1.15 s). Previous는 prefetch 대상이 아님: 1.2–1.5 s(두 번 누름 400 ms 포함).
+- 폐기 동작 로그 확인: next가 바뀌는 reverse → 폐기·재준비, next 유지 swap → 유지, 직접 선택(9번) → 폐기, 만료 시뮬레이션(+6 h) → 폐기·재준비.
+- **청감(사용자)**: queue — 무음·끊김 없음, 그러나 **경계마다 짧은 "틱"이 명확**(공식 YouTube Music은 없음). replace — 약 0.2 s 공백이 분명해 사용 불가. → **queue 기준 유지, prefetch latency는 해결**, 남은 문제는 경계 click.
+
+Click 원인 분리 (macOS, `itprobe pcm <A> <B> <base.js> <solve.mjs> --auth [--edit-variants]`, `PCMBoundary.swift`; 파일 바이트는 메모리와 즉시 삭제하는 임시 파일에만, 숫자만 출력):
+- 컨테이너 [확인, 3개 경계 6파일]: fragmented MP4, AAC-LC 44.1 kHz stereo, `elst` media_time(**priming) 1600**, segment = mdhd = sidx 합, 마지막 frame 길이를 trun에서 줄여 **padding 195–942 samples**. 즉 presentation = decode sample [1600, 1600+segment).
+- **source PCM**: 직접 decode(AVAudioConverter, trim 없음) 후 edit list대로 A 끝 + B 시작을 이으면 경계 2차 예측 잔차가 주변 99 percentile의 0.04–0.24배 → **원본은 연속** [확인].
+- **AVFoundation의 해석** [확인]: AVAssetReader 출력이 raw **3712**에서 시작 = elst 1600 **+ 2112**(Apple AAC 기본 priming을 추가로 적용). 끝은 elst 끝과 일치. AVAsset duration ≈ 2×(5,760,220 samples) — **2배 duration의 원인도 같은 곳**. edit list를 바꿔 보면 시작 = media_time + 2112(0→2112, 512→2624, 3712→5824, edts 제거→2112) → edit list 값으로는 1600에 맞출 수 없음.
+- AVFoundation 출력 그대로 이으면(A 끝 + B의 3712부터) 경계 잔차 = 주변 p99의 **9.6배**, step 0.067(국소 peak 0.145) → **매 곡 시작 48 ms(2112 samples)의 실제 음악이 빠져 waveform이 점프 = 들리는 틱**.
+- 현재 끝 처리: `forwardPlaybackEndTime = approxDurationMs`는 presentation 기준으로는 elst 끝보다 19–40 samples(0.4–0.9 ms) 앞이지만, AVFoundation timeline은 2112만큼 늦게 시작하므로 **실제 media 끝보다 약 2,072–2,093 samples(47 ms) 뒤**를 가리킴(그 구간의 player 동작은 미측정).
+- **판정: PCM 자체는 연속 → source/encoder 문제 아님. AVQueuePlayer 경계 자체만의 문제도 아님(player 없이 AVAssetReader 출력에서 이미 불연속). 원인은 AVFoundation이 이 파일들의 priming을 edit list + 2112로 이중 trim하는 container 해석 문제.**
+- 해결 후보 확인 [확인, macOS AVAssetReader]: moov에 Apple gapless tag **`iTunSMPB`(priming 1600, padding, sample 수)를 넣고 `edts`를 제거**하면 출력이 정확히 raw 1600…elst 끝(2,880,366 samples), **AVAsset duration도 정확(65.314 s, 2배 현상 사라짐)**. `iTunSMPB` + `edts` 둘 다 두면 3200부터(여전히 과다 trim).
+- 미검증: iOS AVFoundation도 같은지, 수정한 바이트를 실제 AVQueuePlayer에 주면 틱이 사라지는지(→ 재생 경로에서 moov 재작성 필요: `AVAssetResourceLoaderDelegate` custom scheme으로 moov만 바꾸고 나머지 바이트는 offset을 옮겨 전달; fragment 데이터는 moof 기준 offset이라 moov 크기 변화에 안전). 마지막 곡(Eclipse)의 reader 끝이 elst 끝보다 64 samples 짧은 현상은 원인 미조사.
+- UI·Now Playing 길이는 InnerTube 값을 유지하고, gapless의 실제 start/end trim은 container sample timing(elst/trun)을 사용하는 방향(사용자 지침).
+- 참고: probe bootstrap이 한 번 `signatureTimestamp 20723`을 받음(같은 시각 page의 jsUrl은 fb50cd46/20719) → player 버전 rollout 중 불일치 가능. resolver는 probe 확인으로 실패를 걸러냄.
+
+#### 다음 단계 후보 (미구현, 사용자 결정 대기)
+1. **(권장 검증)** spike에서 `AVAssetResourceLoaderDelegate`로 moov만 재작성(`edts` 제거 + `iTunSMPB`) → queue 모드 청감 재확인. 성공 시 `forwardPlaybackEndTime` 불필요(정확한 duration).
+2. 끝만 보정(`forwardPlaybackEndTime`을 AVFoundation timeline의 media 끝으로): 시작 48 ms 손실은 남으므로 틱 해소 불가 예상.
+3. `AVAudioEngine` 등 자체 decode·scheduling: 오프라인에서 연속성 확인됨. 비용 최대 — 1이 실패할 때만 검토.
 
 
 production 관점 비용 (판단 재료, 미결정):
