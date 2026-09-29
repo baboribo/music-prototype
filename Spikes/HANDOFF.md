@@ -3,6 +3,11 @@
 2026-09-28 기준. 목적: 실제 YouTube 응답과 iOS 27 runtime으로 데이터·인증·재생 경로를 결정할 evidence 확보. 제품 기능 구현이 아니다.
 표기: **[확인]** 이 환경에서 실제 응답/실기기로 관찰 · **[가설]** 추론 또는 외부 자료 · **[미검증]** 시도하지 않음.
 
+**계정 baseline 규칙 (2026-09-29, 사용자 지시)**: 이 계정은 사용자가 계속 쓰는 본계정이다. 다른 기기에서 좋아요·재생·보관함·재생목록·최근 활동이 개발 중에도 바뀐다.
+- 과거 기록의 총 곡 수, 보관함 개수, Home/Library 순서, 최근 활동을 고정 baseline으로 쓰지 않는다(아래 A1–A8 기록의 숫자·순서는 **그 시점의 관찰값**일 뿐).
+- write 실험은 **실험 직전에 target item 하나의 현재 서버 상태**(liked / inLibrary / saved / pinned / subscribed)를 새로 읽어 baseline으로 삼고, reverse 후 **그 항목만** 직전 상태로 돌아왔는지 확인한다.
+- 목록 개수·순서 변화는 외부 변화로 기록만 하고, 테스트 잔여물로 추정해 되돌리거나 삭제하지 않는다.
+
 ## 1. 저장소 상태
 
 - `main` = `9e1965a` (mock UI checkpoint). `spike/innertube-playback` = main + (1) Xcode Personal Team signing commit + (2) 이 문서를 포함한 spike checkpoint commit. `outputs/`, `references/`는 기존 정책대로 미추적.
@@ -290,7 +295,7 @@ playlistPanelVideoWrapperRenderer
 - probe(리듬에 몸을 맡기는 밤) + Simulator live(혼란과 소음 사이의 강렬한 에너지, 맞춤 믹스 shelf에서 진입): + 탭 → `like/like` 1회, ✓, 서버 toggle on·보관함 재생목록 3번째·landing 선두 → ✓ 탭 → `like/removelike` 1회, 서버 toggle off, **재생목록 첫 page·landing이 원 응답과 동일**.
 - 미확인: 이미 보관함에 있는 믹스(header가 ephemeral endpoint)의 해제 — 앱은 `likeEndpoint` target만 membership으로 읽으므로 그 경우 버튼 없음(보관 믹스를 해제하면 되돌릴 저장 경로가 like인지 확인 필요, 계정 상태 변경을 피하려고 실행 안 함).
 
-#### A8 마무리 계정 상태 확인 (2026-09-29, probe)
+#### A8 마무리 계정 상태 확인 (2026-09-29, probe — 목록 단위 비교는 위 baseline 규칙 이전 방식, 참고용)
 - 원 응답과 동일: 보관함 노래 첫 page, 보관함 앨범, 보관함 재생목록, landing, 다시 듣기 항목별 고정 상태, 구독 아티스트.
 - 좋아요 목록만 1,111 → 1,112곡: 선두에 散歩の邪魔(`W5LokuZxi0k`) 추가, 기존 100번째가 첫 page 밖으로 밀림. 이 곡은 앱·probe의 어떤 쓰기 로그에도 없고, 06:23(마지막 원복)~08:48 사이 쓰기 없음 → **계정 소유자의 다른 기기 활동으로 판단, 건드리지 않음**. (같은 곡이 보관함 노래에도 선두로 나타난 것과 일치.)
 - 실행하지 않은 것: 재생목록 삭제, 관심 없음/추천 안 함, 재생목록 곡 삭제, attestation 우회 구독.
@@ -304,7 +309,40 @@ playlistPanelVideoWrapperRenderer
 4. B2 실험(sig/n만 적용 시 200 여부) — 사용자 승인 대기.
 5. (완료) A7 checkpoint commit.
 6. (완료) A8 Write Actions: 좋아요·앨범/재생목록/믹스 저장·곡 보관함·다시 듣기 고정(A8.1–A8.7). 구독은 (c) 방향으로 미연결.
-7. 다음: 앱 내부 인증/session 조사(WKWebView, 공식 web 구독 흐름 검토 포함) → B2 Playback feasibility spike(승인됨, 별도 spike).
+7. (완료, 8절 C) 앱 내부 인증/session feasibility spike. 남은 실기기·사용자 참여 항목은 C 참조.
+8. 다음: B2 Playback feasibility spike(승인됨, 별도 spike).
+
+### C. In-app authentication / session (2026-09-29, `Spikes/WebPlayerSpike` 확장, 본 앱 미연결)
+목표: 사용자가 DevTools로 cookie를 복사하지 않고, 공개 iOS/WebKit API만으로 로그인·유지·만료·재인증·로그아웃. 개발용 `YTM_SESSION_FILE`은 유지.
+
+spike 구성: `WebPlayerSpike/AuthProbe.swift`(기존 앱·bundle 재사용, 새 profile slot 없음) + UI 버튼(Cookies / Page / Native / Logout(iso) / Artist) + `SPIKE_AUTOPROBE=1` 자동 1회 실행. 로그는 앱 `Documents/probe.log`, **cookie 값·token·응답 본문은 기록하지 않음**(이름·플래그·만료일수·HTTP status·`logged_in`·경로만). `NetworkObserverScript`는 페이지의 fetch/XHR/beacon을 원 함수 그대로 호출하고 **host+path만** 보고(본문·query 없음).
+
+결과 [확인, Simulator — 이 spike의 기존 persistent WKWebView session, 이전 spike에서 사용자가 로그인한 것]:
+1. **로그인**: 실기기 WKWebView에서 Google 로그인·2단계 인증·채널 선택 가능(7절, 사용자 확인). universal link로 YouTube 앱에 넘어가는 것은 cross-site GET을 `webView.load`로 재발행해 해결(공개 API).
+2. **persistence**: `WKWebsiteDataStore.default()`(persistent)의 session이 앱 재실행 후에도 유지. 인증 cookie 15종(SID/HSID/SSID/APISID/SAPISID, `__Secure-1P/3P` SID·APISID·SIDCC·SIDTS, LOGIN_INFO) 모두 `.youtube.com`, 만료 364–399일. 페이지 로드 시 SIDCC 계열이 갱신됨(cookie observer로 관찰).
+3. **native credential 사용**: `WKHTTPCookieStore.allCookies()`가 **HttpOnly 포함** 전부 반환 → `HTTPCookie.requestHeaderFields` + 요청마다 SAPISIDHASH(1P/3P) 계산 → `URLSession`(ephemeral, cookie 저장 없음) WEB_REMIX `browse FEmusic_library_landing` = **HTTP 200, `logged_in=1`**. 응답에 Set-Cookie 없음(native 요청이 web view session을 갱신·훼손하지 않음). 즉 현재 앱의 `SessionCredential`(Cookie + SAPISIDHASH)과 **같은 형태를 파일 대신 WebKit store에서 얻을 수 있다**.
+   - 페이지 `ytcfg`: `LOGGED_IN=true`, client `WEB_REMIX` **`1.20260927.17.00`**(앱 하드코딩 `1.20260707.12.00`보다 최신), `SESSION_INDEX` 있음, `DELEGATED_SESSION_ID` 없음(이 계정은 기본 채널). → client version·session index(`X-Goog-AuthUser`)·visitorData를 **로그인된 페이지에서 읽어 쓰는 것**이 추측값보다 안전. 브랜드 채널 선택 시에는 `DELEGATED_SESSION_ID` → `X-Goog-PageId`가 필요할 것 [가설, 브랜드 채널 미검증].
+   - JS에서도 SAPISID 읽힘(web client가 직접 해시를 만드는 이유). 대안으로 요청을 페이지 안(`callAsyncJavaScript`, `.page` world)에서 보내면 cookie가 native 메모리로 오지 않지만, 페이지가 항상 로드돼 있어야 하고 응답 전체가 JS↔native bridge를 건넘 → 기본안은 native 요청.
+4. **만료 감지**: (a) 기존 `logged_in=0` / HTTP 401·403 → `SessionCredentialStore.markRejected()` 경로 그대로. (b) `WKHTTPCookieStoreObserver.cookiesDidChange`로 SID/SAPISID 계열 **삭제**를 즉시 감지(추가·삭제·만료 변경을 이름 단위로 관찰 확인). 서버 측 강제 로그아웃(9-28 사례)은 cookie가 남아도 (a)로만 드러남.
+5. **재인증**: 만료 감지 → 로그인 sheet(같은 persistent store의 WKWebView, `https://accounts.google.com/ServiceLogin?continue=https://music.youtube.com/` 계열 [가설: 정확한 진입 URL은 실기기에서 확정]) → 로그인 완료(페이지 `LOGGED_IN`) 후 store 재조회. 파일 방식과 달리 **같은 store가 갱신되므로 앱 재시작 불필요**.
+6. **logout**: `WKWebsiteDataStore.removeData(ofTypes:for:)`로 youtube/google 기록 삭제 → cookie 0 [확인, **분리된 `WKWebsiteDataStore(forIdentifier:)`**에 marker cookie를 넣어 검증, 사용자 session은 건드리지 않음]. store 자체 삭제 `WKWebsiteDataStore.remove(forIdentifier:)`는 store 객체를 놓은 뒤 성공(`allDataStoreIdentifiers`에서 사라짐). 로컬 삭제는 서버 session을 폐기하지 않음 → 서버 측 로그아웃까지 하려면 공식 web의 로그아웃을 web view 안에서 실행 [미검증: 사용자 본 session 보호를 위해 실행 안 함]. 앱 전용 web view session이므로 서버 로그아웃이 다른 기기·브라우저 session에는 영향 없음 [가설].
+7. **credential이 repo/log에 남지 않는 구조**: 값의 저장소는 WebKit의 앱 container 안 persistent store(iOS Data Protection)뿐. 앱은 요청 시점에 읽어 헤더를 만들고 메모리에서 버림 — Keychain/파일 사본을 만들지 않음. 로그는 이름·상태만(`Write`/`InnerTube` category와 같은 원칙). 개발용 파일 경로(`YTM_SESSION_FILE`)와 저장소 밖 검사는 유지.
+8. **본 앱 연결안 (미구현, 제안)**: 코드에 `AuthStore`라는 타입은 없고 현재 역할은 `SessionCredentialStore`(actor, 파일)이다.
+   - `SessionCredentialStore`의 입력을 source로 추상화: `.file(path)`(개발, 현행) | `.webKit`(MainActor에서 `WKWebsiteDataStore.default().httpCookieStore` + 로그인 페이지 ytcfg의 client version/session index/visitorData를 읽어 `SessionCredential` 생성). rejected 기록은 파일 mtime 대신 **cookie 세트의 식별 가능한 버전**(예: SID 계열 cookie의 만료일 조합) 기준.
+   - UI/domain은 여전히 `MusicCatalog`만 안다. 상태는 `CatalogError.signedOut` 하나로 노출 → 로그인 sheet 표시(시스템 sheet + WKWebView). 로그인 sheet·로그아웃 항목의 위치는 **UI 결정 필요**(현재 앱에 계정 화면 없음, 임의 추가하지 않음).
+   - cookie 회전: Google은 `__Secure-*PSIDTS`를 web page가 주기적으로 갱신 [가설]. native 요청만 오래 쓰면 갱신이 없어 만료가 빨라질 수 있음 → 앱 활성 시 숨은 WKWebView로 music.youtube.com을 가끔 로드해 페이지가 스스로 갱신하게 두는 안 [미검증, 장시간 관찰 필요].
+
+**아티스트 구독 + attestation** [확인, Simulator, 같은 계정; target만 baseline]:
+- 공식 web(모바일 YTM) 아티스트 페이지는 로드 시 스스로 `jnn-pa.googleapis.com/$rpc/google.internal.waa.v1.Waa/Create`·`GenerateIT`(Web Anti-Abuse)와 `youtubei/v1/att/get`을 호출. 페이지의 **구독 버튼을 탭**하면 `subscription/subscribe` 직후 `youtubei/v1/att/log`가 따라감(= A8.4에서 응답에 붙어 오던 `runAttestationCommand`를 **페이지 JS가 직접 이행**). 구독 취소는 페이지의 확인 dialog → `subscription/unsubscribe`(attestation 호출 없음).
+- 검증: 직전 baseline `subscribed:false`(아이유) → 페이지에서 구독 → 서버 `true` → 페이지에서 구독 취소 → 서버 `false`(baseline 복귀).
+- 결론: **attestation을 만들거나 생략하지 않고 구독을 지원하는 안전한 경로 = 공식 web 페이지를 WKWebView에 그대로 보여 주고 사용자가 페이지 버튼을 누르게 하는 것**. native가 JS로 버튼을 대신 누르거나 attestation 결과를 추출·재사용하는 것은 하지 않는다(자동화·우회 경계). 본 앱 UX 안: 아티스트 화면 ☆ → 해당 아티스트의 공식 web 페이지 sheet(같은 persistent session) → 닫을 때 구독 scope invalidate. [UI 결정 필요, 미구현]
+- 같은 WAA/`att` 체계가 다른 write에도 요구될 가능성: 이번 A8 write(좋아요·저장·feedback)의 응답에는 attestation 요구 없음 [확인].
+
+**남은 C 항목 (사용자 참여 필요)**:
+- 실기기에서 새 identifier store로 처음부터 로그인 → 2FA → 채널 선택 → native 요청까지 한 번에 (Simulator 결과는 기존 session 기준).
+- 브랜드 채널 선택 시 `DELEGATED_SESSION_ID`/`X-Goog-PageId` 처리.
+- 서버 측 로그아웃(web 로그아웃)과 재로그인 흐름, 장시간(수일) cookie 회전·만료 관찰.
+- 실기기 iPhone이 이번에는 연결되지 않아 모든 C 결과는 Simulator 기준.
 
 ### B. Native playback spike (본 앱과 분리)
 조사 [가설 — 외부 자료, 이 환경 미검증]:

@@ -93,6 +93,7 @@ struct SpikeView: View {
     @State private var controller = WebController()
     @State private var observer = SystemObserver()
     @State private var desktop = false
+    @State private var auth: AuthProbe?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -113,6 +114,16 @@ struct SpikeView: View {
                     }
                     .buttonStyle(.bordered)
                 }
+                ScrollView(.horizontal) {
+                    HStack {
+                        Button("Cookies") { Task { await auth?.inventory() } }.accessibilityIdentifier("auth.inventory")
+                        Button("Page") { Task { if let w = controller.webView { await auth?.pageState(w) } } }.accessibilityIdentifier("auth.page")
+                        Button("Native") { Task { await auth?.nativeRequest(client: WebController.remix) } }.accessibilityIdentifier("auth.native")
+                        Button("Logout(iso)") { Task { await auth?.logoutOnIsolatedStore() } }.accessibilityIdentifier("auth.logout")
+                        Button("Artist") { controller.loadArtist() }.accessibilityIdentifier("auth.artist")
+                    }
+                    .buttonStyle(.bordered)
+                }
                 Text(log.lines.last ?? "no events")
                     .font(.caption2.monospaced())
                     .lineLimit(3)
@@ -120,7 +131,19 @@ struct SpikeView: View {
             .padding(8)
             .background(.bar)
         }
-        .task { observer.start(log: log, controller: controller) }
+        .task {
+            observer.start(log: log, controller: controller)
+            let probe = AuthProbe(log: log)
+            auth = probe
+            if let webView = controller.webView { probe.attach(webView) }
+            // SPIKE_AUTOPROBE=1: one auth pass after the first page load (Simulator runs).
+            guard ProcessInfo.processInfo.environment["SPIKE_AUTOPROBE"] == "1" else { return }
+            try? await Task.sleep(for: .seconds(8))
+            await probe.inventory()
+            if let webView = controller.webView { await probe.pageState(webView) }
+            await probe.nativeRequest(client: WebController.remix)
+            await probe.logoutOnIsolatedStore()
+        }
     }
 }
 
@@ -134,6 +157,14 @@ final class WebController {
 
     func loadHome() {
         webView?.load(URLRequest(url: URL(string: "https://music.youtube.com/")!))
+    }
+
+    /// WEB_REMIX identity used by the app's InnerTube client (yt-dlp master, 2026-09).
+    static let remix = (name: "WEB_REMIX", id: "67", version: "1.20260707.12.00")
+
+    /// An artist page, for the official web's own subscribe flow (the user taps it).
+    func loadArtist() {
+        webView?.load(URLRequest(url: URL(string: "https://music.youtube.com/channel/UCTUR0sVEkD8T5MlSHqgaI_Q")!))
     }
 
     func loadControl() {
@@ -195,6 +226,8 @@ struct WebPlayerView: UIViewRepresentable {
         config.userContentController.add(context.coordinator, name: "probe")
         config.userContentController.addUserScript(
             WKUserScript(source: ProbeScript.source, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        config.userContentController.addUserScript(
+            WKUserScript(source: NetworkObserverScript.source, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
         webView.isInspectable = true
