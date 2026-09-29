@@ -69,6 +69,8 @@ protocol PlayerJSProvider: Sendable {
 struct Solved: Sendable {
     let n: [String: String]
     let sig: [String: String]
+    /// Diagnostics: solver-internal milliseconds and which path ran (numbers/labels only).
+    var diagnostics: [String: Int] = [:]
 }
 
 protocol SignatureSolver: Sendable {
@@ -83,8 +85,6 @@ actor PlaybackResolver {
     private let session: SessionCookieSource
     private let playerJS: PlayerJSProvider
     private let solver: SignatureSolver
-    /// Per player version and challenge: solving is deterministic for a given player JS.
-    private var solvedCache: [String: String] = [:]
     static let origin = "https://music.youtube.com"
     static let clientVersion = "1.20260927.17.00"
     /// AAC first: AVPlayer on iOS plays MP4/AAC; Opus is in WebM.
@@ -119,21 +119,36 @@ actor PlaybackResolver {
         guard let format = Self.preferredItags.lazy.compactMap({ itag in formats.first { $0["itag"] as? Int == itag } }).first,
               let itag = format["itag"] as? Int else { throw ResolutionError.noAudioFormat }
 
-        let url: URL
+        // Collect both challenges first; one solver call per resolve.
+        var comps: URLComponents
+        var sig: (s: String, sp: String)?
         if let direct = (format["url"] as? String).flatMap(URLComponents.init(string:)) {
-            url = try await applyN(direct, player: player)
+            comps = direct
         } else if let cipher = format["signatureCipher"] as? String {
             let q = URLComponents(string: "x:?" + cipher)?.queryItems ?? []
             func v(_ k: String) -> String? { q.first { $0.name == k }?.value }
-            guard let s = v("s"), let raw = v("url"), var comps = URLComponents(string: raw) else {
+            guard let s = v("s"), let raw = v("url"), let parsed = URLComponents(string: raw) else {
                 throw ResolutionError.malformed("signatureCipher")
             }
-            let sig = try await timed("sig") { try await solveOne(player, kind: "sig", challenge: s) }
-            comps.queryItems = (comps.queryItems ?? []) + [URLQueryItem(name: v("sp") ?? "signature", value: sig)]
-            url = try await timed("n") { try await applyN(comps, player: player) }
+            comps = parsed
+            sig = (s, v("sp") ?? "signature")
         } else {
             throw ResolutionError.noAudioFormat
         }
+        let n = comps.queryItems?.first { $0.name == "n" }?.value
+        let solved = try await timed("solve") {
+            try await solver.solve(player, n: n.map { [$0] } ?? [], sig: sig.map { [$0.s] } ?? [])
+        }
+        for (key, value) in solved.diagnostics { phase["solver." + key] = value }
+        if let n {
+            guard let t = solved.n[n] else { throw ResolutionError.solverFailed("n unsolved") }
+            comps.queryItems = comps.queryItems?.map { $0.name == "n" ? URLQueryItem(name: "n", value: t) : $0 }
+        }
+        if let sig {
+            guard let value = solved.sig[sig.s] else { throw ResolutionError.solverFailed("sig unsolved") }
+            comps.queryItems = (comps.queryItems ?? []) + [URLQueryItem(name: sig.sp, value: value)]
+        }
+        guard let url = comps.url else { throw ResolutionError.malformed("url") }
         // A wrong transform shows up as 403 here, before the player sees the URL.
         let status = await timed("probe") { await Self.probe(url) }
         guard status == 206 || status == 200 else { throw ResolutionError.unreachable(status) }
@@ -149,25 +164,6 @@ actor PlaybackResolver {
             videoID: videoID, url: url, itag: itag, mimeType: format["mimeType"] as? String ?? "?",
             duration: length, title: details?["title"] as? String ?? "", artist: details?["author"] as? String ?? "",
             artworkURL: (thumbs.last?["url"] as? String).flatMap(URL.init(string:)), expiresAt: expire, timings: phase)
-    }
-
-    private func applyN(_ comps: URLComponents, player: PlayerJS) async throws -> URL {
-        var comps = comps
-        if let n = comps.queryItems?.first(where: { $0.name == "n" })?.value {
-            let transformed = try await solveOne(player, kind: "n", challenge: n)
-            comps.queryItems = comps.queryItems?.map { $0.name == "n" ? URLQueryItem(name: "n", value: transformed) : $0 }
-        }
-        guard let url = comps.url else { throw ResolutionError.malformed("url") }
-        return url
-    }
-
-    private func solveOne(_ player: PlayerJS, kind: String, challenge: String) async throws -> String {
-        let key = "\(solver.identity)|\(player.id)|\(kind)|\(challenge)"
-        if let hit = solvedCache[key] { return hit }
-        let solved = try await solver.solve(player, n: kind == "n" ? [challenge] : [], sig: kind == "sig" ? [challenge] : [])
-        guard let value = (kind == "n" ? solved.n : solved.sig)[challenge] else { throw ResolutionError.solverFailed("\(kind) unsolved") }
-        solvedCache[key] = value
-        return value
     }
 
     private func playerResponse(_ videoID: String, sts: Int) async throws -> [String: Any] {
@@ -284,10 +280,17 @@ struct SolverRelease: Sendable {
 
 /// Runs a pinned ejs release in JavaScriptCore. Files come from Caches or the release URL,
 /// and are used only if their hash matches; otherwise resolution fails.
+///
+/// One JSContext lives for the solver's lifetime (the actor serializes its use). The expensive
+/// step — parsing the 2.6 MB player JS into ejs's preprocessed form — happens once per player
+/// version; the result stays in the context as a JS global and in Caches for the next launch.
+/// A new player version drops both and prepares again.
 actor JSCSolver: SignatureSolver {
     nonisolated let identity: String
     private let release: SolverRelease
-    private var sources: [String]?
+    private var context: JSContext?
+    /// Player id whose preprocessed form is loaded in `context` (global `__pre`).
+    private var loadedPlayerID: String?
 
     init(release: SolverRelease) {
         self.release = release
@@ -295,29 +298,114 @@ actor JSCSolver: SignatureSolver {
     }
 
     func solve(_ player: PlayerJS, n: [String], sig: [String]) async throws -> Solved {
-        let sources = try await load()
-        return try await Task.detached(priority: .userInitiated) {
-            guard let context = JSContext() else { throw ResolutionError.solverFailed("JSContext") }
-            var exception: String?
-            context.exceptionHandler = { _, value in exception = value?.toString() }
-            context.evaluateScript(sources[0])
-            context.evaluateScript("var meriyah = lib.meriyah, astring = lib.astring;")
-            context.evaluateScript(sources[1])
-            if let exception { throw ResolutionError.solverFailed("load: \(exception.prefix(80))") }
-            context.setObject(["type": "player", "player": player.source,
-                               "requests": [["type": "n", "challenges": n], ["type": "sig", "challenges": sig]]] as [String: Any],
-                              forKeyedSubscript: "__input" as NSString)
-            guard let output = context.evaluateScript("JSON.stringify(jsc(__input))")?.toString(), exception == nil,
-                  let root = try JSONSerialization.jsonObject(with: Data(output.utf8)) as? [String: Any],
-                  let responses = root["responses"] as? [[String: Any]], responses.count == 2 else {
-                throw ResolutionError.solverFailed("run: \(exception?.prefix(80) ?? "no output")")
+        var diagnostics: [String: Int] = [:]
+        func ms(_ start: ContinuousClock.Instant) -> Int {
+            let d = ContinuousClock.now - start
+            return Int(d.components.seconds * 1000 + d.components.attoseconds / 1_000_000_000_000_000)
+        }
+        let requests: [[String: Any]] = [["type": "n", "challenges": n], ["type": "sig", "challenges": sig]]
+
+        var start = ContinuousClock.now
+        let context = try await readyContext()
+        diagnostics["context"] = ms(start)
+
+        if loadedPlayerID == player.id {
+            start = ContinuousClock.now
+            if let solved = try? run(context, preprocessed: true, player: nil, requests: requests), solved.complete(n: n, sig: sig) {
+                diagnostics["cachedRun"] = ms(start)
+                diagnostics["path.memory"] = 1
+                return Solved(n: solved.n, sig: solved.sig, diagnostics: diagnostics)
             }
-            return Solved(n: responses[0]["data"] as? [String: String] ?? [:], sig: responses[1]["data"] as? [String: String] ?? [:])
-        }.value
+            loadedPlayerID = nil  // unusable: prepare again below
+        }
+
+        // Another player version (or none yet): forget the old one, then try this version's disk copy.
+        let file = preprocessedFile(player.id)
+        if loadedPlayerID != player.id {
+            loadedPlayerID = nil
+            context.setObject(nil, forKeyedSubscript: "__pre" as NSString)
+            removeOtherPreprocessed(keeping: file)
+        }
+        start = ContinuousClock.now
+        if let data = try? Data(contentsOf: file) {
+            context.setObject(String(decoding: data, as: UTF8.self), forKeyedSubscript: "__pre" as NSString)
+            diagnostics["diskLoad"] = ms(start)
+            start = ContinuousClock.now
+            if let solved = try? run(context, preprocessed: true, player: nil, requests: requests), solved.complete(n: n, sig: sig) {
+                loadedPlayerID = player.id
+                diagnostics["cachedRun"] = ms(start)
+                diagnostics["path.disk"] = 1
+                return Solved(n: solved.n, sig: solved.sig, diagnostics: diagnostics)
+            }
+            try? FileManager.default.removeItem(at: file)  // stale or corrupt copy
+        }
+
+        // Full player: solve and keep the preprocessed form.
+        start = ContinuousClock.now
+        let solved = try run(context, preprocessed: false, player: player.source, requests: requests)
+        diagnostics["fullRun"] = ms(start)
+        diagnostics["path.full"] = 1
+        guard solved.complete(n: n, sig: sig) else { throw ResolutionError.solverFailed("incomplete") }
+        if let pre = context.objectForKeyedSubscript("__pre"), !pre.isUndefined, !pre.isNull, let text = pre.toString() {
+            loadedPlayerID = player.id
+            try? Data(text.utf8).write(to: file)
+        }
+        return Solved(n: solved.n, sig: solved.sig, diagnostics: diagnostics)
+    }
+
+    /// One `jsc(...)` call. The preprocessed player stays in JS (`__pre`); only small values cross the bridge.
+    private func run(_ context: JSContext, preprocessed: Bool, player: String?, requests: [[String: Any]]) throws -> Solved {
+        var exception: String?
+        context.exceptionHandler = { _, value in exception = value?.toString() }
+        context.setObject(requests, forKeyedSubscript: "__req" as NSString)
+        let script: String
+        if preprocessed {
+            script = "JSON.stringify(jsc({type: 'preprocessed', preprocessed_player: __pre, requests: __req}).responses)"
+        } else {
+            context.setObject(player, forKeyedSubscript: "__player" as NSString)
+            script = """
+            (function () {
+              const out = jsc({type: 'player', player: __player, requests: __req, output_preprocessed: true});
+              __pre = out.preprocessed_player; __player = undefined;
+              return JSON.stringify(out.responses);
+            })()
+            """
+        }
+        guard let output = context.evaluateScript(script)?.toString(), exception == nil,
+              let responses = try JSONSerialization.jsonObject(with: Data(output.utf8)) as? [[String: Any]], responses.count == 2 else {
+            throw ResolutionError.solverFailed("run: \(exception?.prefix(80) ?? "no output")")
+        }
+        return Solved(n: responses[0]["data"] as? [String: String] ?? [:], sig: responses[1]["data"] as? [String: String] ?? [:])
+    }
+
+    /// The long-lived context with the verified solver loaded.
+    private func readyContext() async throws -> JSContext {
+        if let context { return context }
+        let sources = try await load()
+        guard let context = JSContext() else { throw ResolutionError.solverFailed("JSContext") }
+        var exception: String?
+        context.exceptionHandler = { _, value in exception = value?.toString() }
+        context.evaluateScript(sources[0])
+        context.evaluateScript("var meriyah = lib.meriyah, astring = lib.astring; var __pre;")
+        context.evaluateScript(sources[1])
+        if let exception { throw ResolutionError.solverFailed("load: \(exception.prefix(80))") }
+        self.context = context
+        return context
+    }
+
+    private func preprocessedFile(_ playerID: String) -> URL {
+        URL.cachesDirectory.appending(path: "solver-\(release.version)").appending(path: "preprocessed-\(playerID).js")
+    }
+
+    private func removeOtherPreprocessed(keeping file: URL) {
+        let dir = file.deletingLastPathComponent()
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: dir.path())) ?? []
+        where name.hasPrefix("preprocessed-") && name != file.lastPathComponent {
+            try? FileManager.default.removeItem(at: dir.appending(path: name))
+        }
     }
 
     private func load() async throws -> [String] {
-        if let sources { return sources }
         let dir = URL.cachesDirectory.appending(path: "solver-\(release.version)")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         var out: [String] = []
@@ -333,9 +421,14 @@ actor JSCSolver: SignatureSolver {
             }
             out.append(String(decoding: data!, as: UTF8.self))
         }
-        sources = out
         return out
     }
 
     static func sha256(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
+}
+
+private extension Solved {
+    func complete(n: [String], sig: [String]) -> Bool {
+        n.allSatisfy { self.n[$0] != nil } && sig.allSatisfy { self.sig[$0] != nil }
+    }
 }

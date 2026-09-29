@@ -25,7 +25,8 @@ struct SpikeRoot: View {
             Tab("Audio", systemImage: "waveform", value: "audio") { NativeAudioView() }
         }
         .onAppear {
-            if ProcessInfo.processInfo.environment["SPIKE_AUDIOTEST"] == "1" { tab = "audio" }
+            let env = ProcessInfo.processInfo.environment
+            if env["SPIKE_AUDIOTEST"] == "1" || env["SPIKE_LATENCYTEST"] == "1" { tab = "audio" }
         }
     }
 }

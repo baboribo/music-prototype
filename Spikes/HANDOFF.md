@@ -311,7 +311,7 @@ playlistPanelVideoWrapperRenderer
 6. (완료) A8 Write Actions: 좋아요·앨범/재생목록/믹스 저장·곡 보관함·다시 듣기 고정(A8.1–A8.7). 구독은 (c) 방향으로 미연결.
 7. (완료, 8절 C·C2) 앱 내부 인증/session: Simulator feasibility + 실기기 fresh-store E2E. 남은 항목은 C2 참조.
 8. B2 feasibility 결론: blocker는 sig/n뿐, 변환 시 200/206, macOS·**iPhone AVPlayer 재생** [확인] (B2 2차). SABR 미구현 결정.
-9. B3 native audio 1–8단계 [확인] (B3). 다음: 전환 지연 개선(solver 1회·전처리 캐시·prefetch) 결정 대기. Video/HLS/Song↔Video는 audio 안정화 후.
+9. B3 native audio 1–8단계 [확인] (B3). B3.1 전환 지연 4.3–4.9 s → 0.6–1.2 s [확인]. 다음: prefetch(+앨범 gapless 기반) 별도 단계. Video/HLS/Song↔Video는 audio 안정화 후.
 
 ### C. In-app authentication / session (2026-09-29, `Spikes/WebPlayerSpike` 확장, 본 앱 미연결)
 목표: 사용자가 DevTools로 cookie를 복사하지 않고, 공개 iOS/WebKit API만으로 로그인·유지·만료·재인증·로그아웃. 개발용 `YTM_SESSION_FILE`은 유지.
@@ -434,7 +434,31 @@ spike 구성: `WebPlayerSpike/AuthProbe.swift`(기존 앱·bundle 재사용, 새
 **Next/Previous 지연 분리** [확인, 원격 명령 5회]: 전체 4.3–4.9 s(사용자 체감 약 5 s) = 명령→queue 변경→resolve 시작 ~10 ms · `/player` 350–560 ms · player JS 0 ms(캐시) · **sig ~1,950 ms · n ~1,940 ms** · probe 35–95 ms · resolve 완료→item ready ~300 ms. → **약 85%가 기기 solver**. 원인: sig와 n을 따로 부르고 매번 새 JSContext에서 solver와 2.6 MB player JS 전체를 다시 파싱.
 - macOS 측정(node, 같은 solver) [확인]: player 전체 1회 ~260–300 ms, **ejs의 `preprocessed_player` 재사용 시 n+sig ~60 ms**(전처리 결과 3.6 MB, player 버전별 캐시 필요). 기기 추정: 곡당 solver ~0.4 s [가설, 미측정].
 - **자동 Next(곡 종료 후)도 같은 지연** [확인, 사용자 보고 + 로그]: `ended` 322.9 → 다음 곡 resolve 완료 327.3 → playing 327.5 = 곡 사이 **약 4.6 s 무음**. 자동 전환도 끝난 뒤에 resolve를 시작하는 같은 경로라 원인 동일. gapless와 거리가 멀어, 자동 전환에는 prefetch가 특히 필요.
-- 개선안(미구현, 사용자 결정 대기): (1) 곡당 solver 1회(n+sig 함께) (2) player 버전별 전처리 결과를 메모리·Caches에 보관, JSContext 재사용 (3) 그 뒤 다음 곡 미리 resolve(prefetch): URL 유효 약 6 h(`expire` 359분 관찰), queue 변경 시 무효화. (1)+(2)만으로 전환 ~1.2 s, prefetch 추가 시 ~0.3 s(item 준비)로 예상 [가설].
+- 개선안 결정(사용자): (1)+(2) 먼저, prefetch는 별도 단계.
+
+#### B3.1 전환 지연 개선: 곡당 solver 1회 + 전처리 player 캐시 (2026-09-29, iPhone 15 Pro Max) [확인]
+구현(`PlaybackResolver.swift`):
+- resolve마다 sig·n challenge를 모아 **`solver.solve` 1회**.
+- `JSCSolver`: **JSContext 1개를 actor 수명 동안 재사용**(solver lib/core는 한 번만 평가). player 버전별로 ejs `output_preprocessed` 결과를 **JS 전역(`__pre`)에 올려 두고** 다음부터 `type: 'preprocessed'`로 실행(3.6 MB 문자열이 매 호출 bridge를 건너지 않음). 같은 결과를 `Caches/solver-0.8.0/preprocessed-<playerId>.js`에 저장해 재실행 시 사용.
+- player 버전이 바뀌면 메모리의 `__pre`를 비우고 다른 버전의 전처리 파일을 삭제한 뒤 새로 준비. 캐시로 풀지 못하면(손상·불완전) 파일을 지우고 전체 player로 다시 → 그래도 실패하면 `solverFailed`로 resolution 실패. release/hash 검증·`probe` 확인은 그대로.
+- 진단: `phases`에 `solve`, `solver.context/diskLoad/cachedRun/fullRun`, 경로(`path.memory/disk/full`).
+
+측정 (자동 테스트 `SPIKE_LATENCYTEST`, 명령 → queue 변경 → resolve → item ready → playing; 이전 값은 B3):
+| | 이전 | cold(캐시 없음) | 재실행 첫 곡(디스크) | 같은 버전 이후 |
+|---|---|---|---|---|
+| player JS | 0 | 1,253 ms | 1,217 ms | 0 |
+| `/player` | 350–560 | 1,001 | 705 | 290–500 |
+| sig+n | ~3,900(2회) | 1,899(전체 파싱) | **110**(disk 23 + 실행 62) | **12–23** |
+| probe | 35–95 | 27 | 26 | 30–300 |
+| resolve → item ready | ~300 | ~440 | ~260 | 250–490 |
+| 명령 → playing | **4.3–4.9 s** | 4.68 s | **2.37 s** | **0.63–1.15 s** |
+- Next 6회: 0.63–1.15 s. Previous(두 번 누름, 사이 400 ms 포함) 1.04–1.13 s → 두 번째 누름 기준 약 0.64–0.73 s.
+- 남은 비중: `/player` network(~0.3–0.5 s) + AVPlayerItem 준비(~0.25–0.5 s). cold의 player JS 1.2 s는 앱 시작마다 music.youtube.com HTML로 player 버전을 확인하는 비용(버전 확인 주기·재사용으로 줄일 여지) [미개선].
+- 로그상 `timeControl=playing`이 item ready 전에 한 번 찍히는 경우가 있음(rate 설정 직후) — 실제 소리 시작은 item ready 뒤의 `playing` 기준으로 봄.
+
+#### 다음 단계 요구사항 (기록만, 미구현)
+- **Prefetch(다음 곡 미리 resolve)**: 수동·자동 Next 지연 감소가 목표. 여기에 더해 **트랙 경계가 이어지는 앨범의 gapless/continuous playback 기반 확보**도 목표에 포함(사용자 요구). 현재 자동 Next는 곡 끝에서 resolve를 시작해 곡 사이 무음 발생(B3).
+- 고려할 점(설계 시): URL 유효시간(`expire` 약 6 h), queue 변경·셔플·곡 전환 시 무효화, `/player` 추가 요청 수, AVQueuePlayer 또는 다음 item 미리 준비 여부, 이 MP4들의 2배 duration 처리(`forwardPlaybackEndTime`)와 gapless의 상호작용, AAC priming(elst media_time 1600) 처리.
 
 
 production 관점 비용 (판단 재료, 미결정):

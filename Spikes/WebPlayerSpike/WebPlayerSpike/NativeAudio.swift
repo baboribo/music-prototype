@@ -92,8 +92,12 @@ final class NativeAudioPlayer {
         })
         // Why the rate changed (appBackgrounded, audioSessionInterrupted, setRateCalled, …).
         tokens.append(center.addObserver(forName: AVPlayer.rateDidChangeNotification, object: nil, queue: .main) { [weak self] note in
-            let reason = (note.userInfo?[AVPlayer.rateDidChangeReasonKey] as? AVPlayer.RateDidChangeReason)?.rawValue ?? "?"
+            // The reason is a string; read it by its key's value inside the main-actor block.
+            let values = (note.userInfo ?? [:]).reduce(into: [String: String]()) { dict, pair in
+                if let key = pair.key as? String, let value = pair.value as? String { dict[key] = value }
+            }
             MainActor.assumeIsolated {
+                let reason = values[AVPlayer.rateDidChangeReasonKey] ?? "?"
                 self?.log("rateChange", ["reason": reason.replacingOccurrences(of: "AVPlayerRateDidChangeReason", with: "")]
                     .merging(self?.playerState() ?? [:]) { a, _ in a })
             }
@@ -382,6 +386,37 @@ final class NativeAudioPlayer {
         log("test", ["step": "done"])
     }
 
+    // MARK: Latency measurement, SPIKE_LATENCYTEST=1 (SPIKE_CLEAR_PRE=1 drops the preprocessed cache first)
+
+    func latencyTest() async {
+        if ProcessInfo.processInfo.environment["SPIKE_CLEAR_PRE"] == "1" {
+            let dir = URL.cachesDirectory.appending(path: "solver-0.8.0")
+            let removed = ((try? FileManager.default.contentsOfDirectory(atPath: dir.path())) ?? [])
+                .filter { $0.hasPrefix("preprocessed-") }
+            removed.forEach { try? FileManager.default.removeItem(at: dir.appending(path: $0)) }
+            log("latencyTest", ["cleared": removed.count])
+        }
+        log("latencyTest", ["step": "start"])
+        beginCommand("first play")
+        play(at: 0)
+        _ = await waitUntil(30, { self.isPlaying && self.player.currentTime().seconds > 1 })
+        for step in ["next", "next", "next", "previous", "previous"] {
+            try? await Task.sleep(for: .seconds(4))
+            let target = index
+            beginCommand(step)
+            if step == "next" { next() } else {
+                // Two presses: restart, then the previous track (as on the lock screen).
+                previous()
+                try? await Task.sleep(for: .milliseconds(400))
+                previous()
+            }
+            _ = await waitUntil(30, { self.index != target && self.isPlaying && self.player.currentTime().seconds > 0.3 })
+        }
+        try? await Task.sleep(for: .seconds(3))
+        pause()
+        log("latencyTest", ["step": "done"])
+    }
+
     private func waitUntil(_ seconds: Double, _ condition: @escaping @MainActor () -> Bool) async -> Bool {
         let deadline = Date().addingTimeInterval(seconds)
         while Date() < deadline {
@@ -430,6 +465,7 @@ struct NativeAudioView: View {
         }
         .task {
             if ProcessInfo.processInfo.environment["SPIKE_AUDIOTEST"] == "1" { await audio.scriptedTest() }
+            if ProcessInfo.processInfo.environment["SPIKE_LATENCYTEST"] == "1" { await audio.latencyTest() }
         }
     }
 }
