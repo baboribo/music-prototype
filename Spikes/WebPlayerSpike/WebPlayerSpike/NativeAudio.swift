@@ -40,6 +40,8 @@ final class NativeAudioPlayer {
     private(set) var lines: [String] = []
     private(set) var resolving = false
     private(set) var transition: Transition = .queue
+    /// Items load through `GaplessLoader` (moov rewritten: edit list → iTunSMPB) instead of the URL directly.
+    private(set) var gapless = true
     /// The listener's intent: a pause during resolution must hold when the item arrives.
     private var wantsPlayback = false
     private(set) var volume: Float = AVAudioSession.sharedInstance().outputVolume
@@ -56,7 +58,7 @@ final class NativeAudioPlayer {
 
     /// Every item this player made, with the queue slot and resolution it plays (held strongly,
     /// so an identifier is never reused while listed). Pruned when an item leaves the player.
-    private struct Loaded { let item: AVPlayerItem; let index: Int; let audio: ResolvedAudio }
+    private struct Loaded { let item: AVPlayerItem; let index: Int; let audio: ResolvedAudio; let loader: GaplessLoader? }
     private var loaded: [ObjectIdentifier: Loaded] = [:]
     private var itemObservations: [ObjectIdentifier: NSKeyValueObservation] = [:]
 
@@ -171,6 +173,8 @@ final class NativeAudioPlayer {
         })
         if let mode = ProcessInfo.processInfo.environment["SPIKE_MODE"].flatMap(Transition.init(rawValue:)) { transition = mode }
         player.actionAtItemEnd = Self.endAction(transition)
+        if let value = ProcessInfo.processInfo.environment["SPIKE_GAPLESS"] { gapless = value == "1" }
+        log("gapless", ["on": gapless])
         log("mode", ["transition": transition.rawValue])
         registerRemoteCommands()
     }
@@ -295,14 +299,24 @@ final class NativeAudioPlayer {
     }
 
     private func makeItem(_ audio: ResolvedAudio, index: Int) -> AVPlayerItem {
-        let item = AVPlayerItem(url: audio.url)
-        // These fragmented MP4s carry the full length in mvhd as well as in their fragments;
-        // AVPlayer adds both (2× duration) and would only end at twice the real length.
-        // Ending the item at the service's length restores didPlayToEndTime.
-        if let duration = audio.duration {
-            item.forwardPlaybackEndTime = CMTime(seconds: duration, preferredTimescale: 44_100)
+        let item: AVPlayerItem
+        var loader: GaplessLoader?
+        if gapless {
+            // Exact priming/padding from the container: no end-time override, the asset's own length is right.
+            let gaplessLoader = GaplessLoader(source: audio.url, videoID: audio.videoID) { [weak self] kind, body in
+                self?.log(kind, body.merging(["index": index]) { a, _ in a })
+            }
+            item = AVPlayerItem(asset: gaplessLoader.makeAsset())
+            loader = gaplessLoader
+        } else {
+            item = AVPlayerItem(url: audio.url)
+            // As served, AVFoundation trims the edit list plus 2112 samples and reports about 2× the length,
+            // so it would only end at twice the real length. Ending at the service's length restores the end.
+            if let duration = audio.duration {
+                item.forwardPlaybackEndTime = CMTime(seconds: duration, preferredTimescale: 44_100)
+            }
         }
-        loaded[ObjectIdentifier(item)] = Loaded(item: item, index: index, audio: audio)
+        loaded[ObjectIdentifier(item)] = Loaded(item: item, index: index, audio: audio, loader: loader)
         observeStatus(item)
         return item
     }
@@ -465,6 +479,14 @@ final class NativeAudioPlayer {
         log("queueEdit", ["op": "replace", "count": entries.count])
     }
 
+    func setGapless(_ on: Bool) {
+        guard on != gapless else { return }
+        discardPrefetch("gapless switched")
+        gapless = on
+        log("gapless", ["on": on])
+        schedulePrefetch()
+    }
+
     func setTransition(_ mode: Transition) {
         guard mode != transition else { return }
         discardPrefetch("transition mode changed")
@@ -530,6 +552,8 @@ final class NativeAudioPlayer {
         guard let ended = loaded[id], ended.index == index else { return }
         let nextItem = prefetch?.item
         log("ended", ["index": ended.index, "pos": rounded(ended.item.currentTime().seconds), "serviceDuration": rounded(ended.audio.duration),
+                      "avDuration": rounded(ended.item.duration.seconds.isFinite ? ended.item.duration.seconds : -1), "gapless": gapless,
+                      "loaderRequests": ended.loader?.requests ?? -1,
                       "transition": transition.rawValue, "prefetch": prefetchState,
                       "nextStatus": nextItem.map { $0.status == .readyToPlay ? "ready" : ($0.status == .failed ? "failed" : "unknown") } ?? "none",
                       "nextBuffered": rounded(nextItem?.loadedTimeRanges.last.map { $0.timeRangeValue.end.seconds })])
@@ -693,7 +717,7 @@ final class NativeAudioPlayer {
     /// Plays the last seconds before three album boundaries, and exercises prefetch invalidation
     /// (reorders, a direct selection, simulated expiry) in between.
     func gapTest() async {
-        log("gapTest", ["step": "start", "transition": transition.rawValue])
+        log("gapTest", ["step": "start", "transition": transition.rawValue, "gapless": gapless])
         setQueue(Self.album)
         beginCommand("first play")
         play(at: 0)
@@ -769,6 +793,8 @@ struct NativeAudioView: View {
                 ForEach(NativeAudioPlayer.Transition.allCases) { Text($0.rawValue).tag($0) }
             }
             .pickerStyle(.segmented)
+            Toggle("Gapless header (iTunSMPB)", isOn: Binding(get: { audio.gapless }, set: { audio.setGapless($0) }))
+                .font(.caption)
             HStack {
                 Button("Album") { audio.setQueue(NativeAudioPlayer.album); audio.play(at: 0) }
                 Button("Shuffle next") { audio.shuffleUpcoming() }

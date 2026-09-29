@@ -311,7 +311,7 @@ playlistPanelVideoWrapperRenderer
 6. (완료) A8 Write Actions: 좋아요·앨범/재생목록/믹스 저장·곡 보관함·다시 듣기 고정(A8.1–A8.7). 구독은 (c) 방향으로 미연결.
 7. (완료, 8절 C·C2) 앱 내부 인증/session: Simulator feasibility + 실기기 fresh-store E2E. 남은 항목은 C2 참조.
 8. B2 feasibility 결론: blocker는 sig/n뿐, 변환 시 200/206, macOS·**iPhone AVPlayer 재생** [확인] (B2 2차). SABR 미구현 결정.
-9. B3 native audio 1–8단계 [확인] (B3). B3.1 전환 지연 4.3–4.9 s → 0.6–1.2 s [확인]. B3.2 prefetch + AVQueuePlayer: 경계 무음 ≈0, 수동 Next ~0.02–0.15 s [확인]; 남은 경계 틱 = AVFoundation의 priming 이중 trim(+2112) [확인], `iTunSMPB` 재작성 후보 [macOS 확인, 재생 미검증]. Video/HLS/Song↔Video는 audio 안정화 후.
+9. B3 native audio 1–8단계 [확인] (B3). B3.1 전환 지연 4.3–4.9 s → 0.6–1.2 s [확인]. B3.2 prefetch + AVQueuePlayer: 경계 무음 ≈0, 수동 Next ~0.02–0.15 s [확인]; 경계 틱 원인 = AVFoundation의 priming 이중 trim(+2112) [확인]. B3.3 moov 재작성(`edts`→`iTunSMPB`, resource loader)으로 iPhone gapless·틱 해소·정확한 duration·background [확인]. 후속: Eclipse 64-sample, 재작성 가정 일반화. Video/HLS/Song↔Video는 audio 안정화 후.
 
 ### C. In-app authentication / session (2026-09-29, `Spikes/WebPlayerSpike` 확장, 본 앱 미연결)
 목표: 사용자가 DevTools로 cookie를 복사하지 않고, 공개 iOS/WebKit API만으로 로그인·유지·만료·재인증·로그아웃. 개발용 `YTM_SESSION_FILE`은 유지.
@@ -489,10 +489,34 @@ Click 원인 분리 (macOS, `itprobe pcm <A> <B> <base.js> <solve.mjs> --auth [-
 - UI·Now Playing 길이는 InnerTube 값을 유지하고, gapless의 실제 start/end trim은 container sample timing(elst/trun)을 사용하는 방향(사용자 지침).
 - 참고: probe bootstrap이 한 번 `signatureTimestamp 20723`을 받음(같은 시각 page의 jsUrl은 fb50cd46/20719) → player 버전 rollout 중 불일치 가능. resolver는 probe 확인으로 실패를 걸러냄.
 
-#### 다음 단계 후보 (미구현, 사용자 결정 대기)
-1. **(권장 검증)** spike에서 `AVAssetResourceLoaderDelegate`로 moov만 재작성(`edts` 제거 + `iTunSMPB`) → queue 모드 청감 재확인. 성공 시 `forwardPlaybackEndTime` 불필요(정확한 duration).
-2. 끝만 보정(`forwardPlaybackEndTime`을 AVFoundation timeline의 media 끝으로): 시작 48 ms 손실은 남으므로 틱 해소 불가 예상.
-3. `AVAudioEngine` 등 자체 decode·scheduling: 오프라인에서 연속성 확인됨. 비용 최대 — 1이 실패할 때만 검토.
+#### B3.3 Gapless header 재작성 (2026-09-29, iPhone 15 Pro Max iOS 27.2) [확인]
+사용자 결정: 후보 1(resource loader로 moov만 재작성) 진행, spike 전용, `AVAudioEngine`은 실패 시에만.
+
+구현 (`GaplessLoader.swift`, `@MainActor`, `AVAssetResourceLoaderDelegate`는 main queue + `@MainActor` isolated conformance):
+- item asset URL을 `ytm-gapless://audio/<videoId>`로 만들어 loader가 모든 byte 요청을 처리(서명 URL은 loader 메모리에만).
+- 첫 요청 때 원본 0–64 KiB를 받아 `moov` 파싱: `elst`(media_time = priming, segment → sample 수, movie/media timescale 환산), padding = `(1024 − (priming + samples) % 1024) % 1024`(마지막 frame을 trun에서 줄이는 이 파일들의 방식).
+- `moov` 재작성: `edts`와 기존 `udta`는 같은 크기의 `free`로 이름만 변경, `moov/udta/meta(hdlr mdir)/ilst/----(com.apple.iTunes, iTunSMPB)` 추가(249 B), moov 크기 갱신. 이후 바이트는 원본 그대로 +249 offset으로 전달(fragment는 moof 기준, sidx는 자기 기준 offset이라 안전). contentType `public.mpeg-4`, byte-range 지원, 256 KiB 첫 chunk 후 1 MiB 단위 Range 요청, 취소 시 task 취소.
+- `NativeAudio.swift`: `gapless`(기본 on, env `SPIKE_GAPLESS`, Audio 탭 토글). on이면 loader asset으로 item 생성, **`forwardPlaybackEndTime` 사용 안 함**; off면 기존 경로(직접 URL + service duration 끝 보정). loader는 item 기록(`Loaded`)에 강하게 보관(delegate는 weak).
+
+결과:
+| 항목 | 결과 |
+|---|---|
+| 재작성 값 | priming 1600, padding 594/195/942/725, samples = elst segment — macOS 분석(B3.2)과 일치 [확인, 로그] |
+| duration | `AVPlayerItem.duration` 65.3 / 169.5 / 225.4 / 226.7 s = 서비스 길이(이전 약 2배) [확인, 자동 테스트] |
+| 곡 종료 | `forwardPlaybackEndTime` 없이 각 곡이 제 길이에서 `didPlayToEndTime` [확인] |
+| 자동 Next | queue에 준비된 다음 item으로 AVQueuePlayer가 advance, 3/3 [확인] |
+| 경계 무음 | 로그 추정 ≈0(끝 알림 후 12–18 ms에 새 item 재생 중) [확인]; 청감 무음·끊김 없음 [확인, 사용자] |
+| **틱** | **header on: 사라짐**(Speak to Me→Breathe, Breathe→On the Run, 공식 YouTube Music처럼 자연스럽게 이어짐). **header off: 틱 다시 명확** → 원인·해결 모두 확인 [확인, 사용자 A/B] |
+| background·잠금 | 화면 잠금·화면 꺼짐·Home(background)에서 경계 정상 이어짐 [확인, 사용자] — loader가 main queue에서 동작해도 background 오디오 중 문제 없음 |
+| prefetch | 기존 queue prefetch 경로 그대로 동작(다음 item은 끝 전에 ready·버퍼) [확인] |
+
+결론 [확인]: **`edts` 제거 + `iTunSMPB` + `AVAssetResourceLoaderDelegate` + `AVQueuePlayer` next-item prefetch** 경로가 실제 iPhone에서 연속 트랙 앨범을 gapless로 재생한다. crossfade 없음. `AVAudioEngine` 전환 불필요.
+
+후속·미검증:
+- Eclipse(앨범 마지막 곡)에서 macOS AVAssetReader 출력이 elst 끝보다 64 samples 일찍 끝남(B3.2) — 원인 미조사, 이번 checkpoint와 무관(다음 곡으로 이어지는 경계가 아님).
+- 재작성 가정: moov가 첫 64 KiB 안, 단일 `elst` entry, 마지막 frame 단축 방식의 padding — 다른 itag(140)·다른 인코딩 파일·`edts` 없는 파일에서 미검증(현재는 `noEditList`/`noMoov`로 실패 → resolution 실패로 드러남; 본 앱에선 일반 경로 fallback 필요).
+- seek 중 byte range 요청·긴 pause 후 URL 만료(loader의 원본 URL도 약 6 h) 처리, 네트워크 오류 시 재시도는 미구현.
+- 본 앱 미통합(연결 시: Info.plist `UIBackgroundModes`, `MPMediaItemArtwork` nonisolated handler, loader 수명 관리 함께).
 
 
 production 관점 비용 (판단 재료, 미결정):
