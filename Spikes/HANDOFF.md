@@ -309,7 +309,7 @@ playlistPanelVideoWrapperRenderer
 4. B2 실험(sig/n만 적용 시 200 여부) — 사용자 승인 대기.
 5. (완료) A7 checkpoint commit.
 6. (완료) A8 Write Actions: 좋아요·앨범/재생목록/믹스 저장·곡 보관함·다시 듣기 고정(A8.1–A8.7). 구독은 (c) 방향으로 미연결.
-7. (완료, 8절 C) 앱 내부 인증/session feasibility spike. 남은 실기기·사용자 참여 항목은 C 참조.
+7. (완료, 8절 C·C2) 앱 내부 인증/session: Simulator feasibility + 실기기 fresh-store E2E. 남은 항목은 C2 참조.
 8. B2 진행 중: 1차 분리 실험 완료(B2 1차 참조). sig/n 실행 방법(직접 solver vs 외부 solver) 사용자 결정 대기.
 
 ### C. In-app authentication / session (2026-09-29, `Spikes/WebPlayerSpike` 확장, 본 앱 미연결)
@@ -338,11 +338,30 @@ spike 구성: `WebPlayerSpike/AuthProbe.swift`(기존 앱·bundle 재사용, 새
 - 결론: **attestation을 만들거나 생략하지 않고 구독을 지원하는 안전한 경로 = 공식 web 페이지를 WKWebView에 그대로 보여 주고 사용자가 페이지 버튼을 누르게 하는 것**. native가 JS로 버튼을 대신 누르거나 attestation 결과를 추출·재사용하는 것은 하지 않는다(자동화·우회 경계). 본 앱 UX 안: 아티스트 화면 ☆ → 해당 아티스트의 공식 web 페이지 sheet(같은 persistent session) → 닫을 때 구독 scope invalidate. [UI 결정 필요, 미구현]
 - 같은 WAA/`att` 체계가 다른 write에도 요구될 가능성: 이번 A8 write(좋아요·저장·feedback)의 응답에는 attestation 요구 없음 [확인].
 
-**남은 C 항목 (사용자 참여 필요)**:
-- 실기기에서 새 identifier store로 처음부터 로그인 → 2FA → 채널 선택 → native 요청까지 한 번에 (Simulator 결과는 기존 session 기준).
-- 브랜드 채널 선택 시 `DELEGATED_SESSION_ID`/`X-Goog-PageId` 처리.
-- 서버 측 로그아웃(web 로그아웃)과 재로그인 흐름, 장시간(수일) cookie 회전·만료 관찰.
-- 실기기 iPhone이 이번에는 연결되지 않아 모든 C 결과는 Simulator 기준.
+#### C2. 실기기 E2E (2026-09-29, iPhone 15 Pro Max iOS 27.2, `WebPlayerSpike` Auth 탭) [확인]
+구성: `AuthE2E.swift` — **새 분리 저장소** `WKWebsiteDataStore(forIdentifier:)`(id는 UserDefaults, 재실행 시 재사용), 로그인 sheet(같은 store의 WKWebView, universal link 재발행, host+path 로그), 점검 = cookie metadata → 숨은 WKWebView로 music.youtube.com의 `ytcfg` 읽기 → native `browse` 2건(library landing, 아티스트 — 후자에 entitlement 포함). 로그 `Documents/auth-e2e.log`(누적), devicectl로 회수. cookie·token·헤더 값은 기록하지 않음. 기존 Player 탭(default store)은 건드리지 않음.
+
+| 단계 | 결과 |
+|---|---|
+| 1. 새 저장소 | `store: new`, 인증 cookie 0. 로그인 전 music.youtube.com은 **m.youtube.com(MWEB)으로 redirect**(한국·비Premium 비로그인 상태) → 페이지 config는 `clientName == WEB_REMIX`일 때만 사용하도록 수정. native = 200 `logged_in=0` → 앱 규칙상 `signedOut` |
+| 2–4. 로그인·2FA·채널 | 앱 안 WebView에서 완료(사용자). 흐름 host/path: music → `m.youtube.com/musicpremium` → `youtube.com/signin`(재발행) → `accounts.google.com/v3/signin/identifier` → m.youtube.com. 채널 선택 화면에서 첫 번째(이름 없는 **일반 채널**) 선택. 1차 로그인은 **OTP 코드** 2FA로 앱 밖 이동 없음 |
+| 5–6. cookie | 인증 cookie 15종 생성(`.youtube.com`, SID/HSID/SSID/APISID/SAPISID, `__Secure-1P/3P` SID·APISID·SIDCC·SIDTS, LOGIN_INFO; HttpOnly·Secure 플래그와 364–399일 만료를 metadata로만 확인), google.com cookie 20 |
+| 7. 페이지 config | `WEB_REMIX 1.20260927.17.00`, `LOGGED_IN=true`, `SESSION_INDEX=0`, `DELEGATED_SESSION_ID` 없음(= 일반 채널), `VISITOR_DATA` 있음 |
+| 8. native | 페이지 config(client version, `X-Goog-AuthUser`=session index, visitorData) + store cookie + SAPISIDHASH → **HTTP 200, `logged_in=1`**, 아티스트 응답 **`has_unlimited_entitlement=True`(Premium)** |
+| 9. 재실행 | 재설치 후 실행, 앱 종료→재실행 모두 같은 store(`existing`), cookie 15, native `logged_in=1`·Premium True |
+| 10. 로그인 UI 재진입 | sheet를 다시 열면 로그인 화면 없이 로그인된 YouTube Music 표시(사용자 확인) |
+| 로컬 로그아웃 | 이 store의 website data 전부 삭제(10 records) → 인증 cookie 0, native `logged_in=0` → **`signedOut`**, Premium False. 서버 측 로그아웃·다른 session 영향 없음(실행 안 함) |
+| 재로그인 | 앱 재시작 없이 같은 store로 재로그인 → cookie 15, native `logged_in=1`·Premium True. **credential 갱신에 재시작 불필요** [확인] |
+
+재로그인 중 관찰 [확인, 원인 일부 가설]:
+- **Google 차단 화면**: 두 번째 로그인에서 이메일 입력 후 "로그인할 수 없음 — 브라우저 또는 앱이 안전하지 않을 수 있습니다"(Google의 내장 WebView/위험 신호 차단). 흐름은 1차와 동일. 사용자가 "다시 시도" 1회 → 통과. 입력 방식(붙여넣기)과는 무관한 것으로 판단 [가설]. **User-Agent 위장 등 우회는 하지 않음**. → 내장 WKWebView 로그인은 **동작하지만 Google이 상황에 따라 거부할 수 있음**. production에서는 차단 화면을 정상 상태로 취급해 안내(다시 시도/나중에)하고, 반복 자동 시도는 금지.
+- **다른 기기 "예" 승인 2FA**: 승인 직후 로그인 마무리 이동이 **iOS universal link로 YouTube 앱에 넘어감**(sheet 로그에 재발행 기록 없음 → 현재 `decidePolicyFor` 재발행 조건(main-frame GET, cross-host)에 걸리지 않는 이동 [가설: redirect 체인 또는 POST 이후 이동]). YouTube 앱의 "외부 브라우저로 열기" 창은 취소(일회용 continue 링크를 다른 브라우저에 넘기지 않기 위해). 그런데도 Google cookie는 앱 store에 이미 기록되어, sheet를 닫고 다시 열자 **자동으로 로그인 완료**(점검 시 cookie 15·`logged_in=1`).
+  - 후속: 모든 main-frame navigation action(host/path/method/type)을 기록해 이 경로를 확정하고 재발행 조건을 보강. 재현은 본계정 재로그인이 필요해 이번에는 하지 않음 [미검증]. 비공개 API(`allowWithoutTryingAppLink` 등)는 쓰지 않음.
+- 아티스트 구독 관련: 실기기에서도 로그인된 공식 페이지가 스스로 WAA `Create`/`GenerateIT`·`att/get` 호출 [확인]. 구독 동작 자체는 실기기에서 실행하지 않음(Simulator C 결과로 충분, 방향: 공식 web sheet에서 사용자가 직접).
+
+결정 (사용자, 2026-09-29): production credential source = WebKit cookie store, `YTM_SESSION_FILE`은 개발용 fallback, client version/account index는 로그인된 페이지 값 우선, 구독은 공식 web sheet.
+
+**남은 C 항목**: 브랜드 채널 선택 시(`DELEGATED_SESSION_ID`→`X-Goog-PageId`) [미검증], 서버 측 로그아웃 [미검증, 하지 않기로 함], 장기(수일) cookie 회전·만료 [미검증], 다른 기기 승인 2FA의 universal link 경로 확정 [미검증], 본 앱 연결(C-8 제안) [미구현].
 
 ### B. Native playback spike (본 앱과 분리)
 조사 [가설 — 외부 자료, 이 환경 미검증]:

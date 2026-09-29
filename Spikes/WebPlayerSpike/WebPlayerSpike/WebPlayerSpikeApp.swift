@@ -10,7 +10,19 @@ struct WebPlayerSpikeApp: App {
     }
 
     var body: some Scene {
-        WindowGroup { SpikeView() }
+        WindowGroup { SpikeRoot() }
+    }
+}
+
+/// Auth E2E (isolated store) and the original player spike (default store) side by side.
+struct SpikeRoot: View {
+    @AppStorage("spike.tab") private var tab = "auth"
+
+    var body: some View {
+        TabView(selection: $tab) {
+            Tab("Auth", systemImage: "person.badge.key", value: "auth") { AuthE2EView() }
+            Tab("Player", systemImage: "play", value: "player") { SpikeView() }
+        }
     }
 }
 
