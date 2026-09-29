@@ -140,3 +140,90 @@ public enum SolverExperiment {
         return comps.url
     }
 }
+
+/// Reads MP4 header boxes (numbers only) from the first bytes of a media URL.
+public enum MP4Header {
+    public static func describe(_ url: URL) async -> [String] {
+        var r = URLRequest(url: url)
+        r.setValue("bytes=0-65535", forHTTPHeaderField: "Range")
+        guard let (data, _) = try? await URLSession(configuration: .ephemeral).data(for: r) else { return ["fetch failed"] }
+        var out: [String] = []
+        let b = [UInt8](data)
+        func u32(_ i: Int) -> Int { i + 4 <= b.count ? Int(b[i]) << 24 | Int(b[i+1]) << 16 | Int(b[i+2]) << 8 | Int(b[i+3]) : 0 }
+        func u64(_ i: Int) -> Int { u32(i) << 32 | u32(i + 4) }
+        func u16(_ i: Int) -> Int { i + 2 <= b.count ? Int(b[i]) << 8 | Int(b[i+1]) : 0 }
+        func type(_ i: Int) -> String { String(bytes: b[(i+4)..<min(i+8, b.count)], encoding: .ascii) ?? "?" }
+        let containers: Set<String> = ["moov", "trak", "mdia", "minf", "stbl", "mvex", "edts", "moof", "traf"]
+        func walk(_ start: Int, _ end: Int, _ depth: Int) {
+            var i = start
+            while i + 8 <= end {
+                let size = u32(i), t = type(i)
+                guard size >= 8, i + size <= b.count || t == "mdat" || t == "moof" else { out.append("\(String(repeating: " ", count: depth))\(t) (truncated)"); return }
+                var note = ""
+                switch t {
+                case "mvhd", "mdhd":
+                    let v = Int(b[i + 8])
+                    let ts = v == 1 ? u32(i + 28) : u32(i + 20)
+                    let dur = v == 1 ? u64(i + 32) : u32(i + 24)
+                    note = "timescale \(ts) duration \(dur) (\(ts > 0 ? String(format: "%.1f", Double(dur) / Double(ts)) : "?") s)"
+                case "elst":
+                    let v = Int(b[i + 8]); let n = u32(i + 12)
+                    note = "entries \(n): " + (0..<min(n, 3)).map { k in
+                        let p = i + 16 + k * (v == 1 ? 20 : 12)
+                        return v == 1 ? "seg \(u64(p)) media_time \(u64(p + 8))" : "seg \(u32(p)) media_time \(Int32(truncatingIfNeeded: u32(p + 4)))"
+                    }.joined(separator: ", ")
+                case "trex":
+                    note = "default_sample_duration \(u32(i + 20)) size \(u32(i + 24))"
+                case "tfhd":
+                    let flags = u32(i + 8) & 0xFFFFFF
+                    var p = i + 16
+                    if flags & 0x01 != 0 { p += 8 }
+                    if flags & 0x02 != 0 { p += 4 }
+                    note = "flags 0x\(String(flags, radix: 16))" + (flags & 0x08 != 0 ? " default_sample_duration \(u32(p))" : "")
+                case "tfdt":
+                    let v = Int(b[i + 8]); note = "base_decode_time \(v == 1 ? u64(i + 12) : u32(i + 12))"
+                case "trun":
+                    let flags = u32(i + 8) & 0xFFFFFF; let count = u32(i + 12)
+                    var p = i + 16
+                    if flags & 0x01 != 0 { p += 4 }
+                    if flags & 0x04 != 0 { p += 4 }
+                    var durs: [Int] = []
+                    if flags & 0x100 != 0 {
+                        let stride = [0x100, 0x200, 0x400, 0x800].filter { flags & $0 != 0 }.count * 4
+                        for k in 0..<min(count, 4) { durs.append(u32(p + k * stride)) }
+                    }
+                    note = "flags 0x\(String(flags, radix: 16)) samples \(count)" + (durs.isEmpty ? "" : " first durations \(durs)")
+                case "mehd":
+                    let v = Int(b[i + 8]); note = "fragment_duration \(v == 1 ? u64(i + 12) : u32(i + 12))"
+                case "sidx":
+                    let v = Int(b[i + 8]); let ts = u32(i + 16)
+                    let refCount = u16(i + (v == 0 ? 30 : 38))
+                    var total = 0
+                    var p = i + (v == 0 ? 32 : 40)
+                    for _ in 0..<refCount { total += u32(p + 4); p += 12 }
+                    note = "timescale \(ts) refs \(refCount) sum_subsegment_duration \(total) (\(ts > 0 ? String(format: "%.1f", Double(total) / Double(ts)) : "?") s)"
+                case "stsd":
+                    // first sample entry: mp4a sample rate (16.16) and esds audio object type
+                    let entry = i + 16
+                    let rate = u32(entry + 32) >> 16
+                    var aot = "?"
+                    if let range = data.range(of: Data([0x05]), in: (entry + 36)..<min(i + size, data.count)), range.lowerBound + 3 < b.count {
+                        // DecoderSpecificInfo tag 0x05, then length byte(s), then AudioSpecificConfig
+                        var k = range.lowerBound + 1
+                        while k < b.count && b[k] & 0x80 != 0 { k += 1 }
+                        k += 1
+                        if k < b.count { aot = "\(Int(b[k]) >> 3)"; aot += " asc0x\(String(format: "%02x%02x", b[k], k + 1 < b.count ? b[k+1] : 0))" }
+                    }
+                    note = "entry \(type(entry)) samplerate \(rate) AOT \(aot)"
+                default: break
+                }
+                out.append("\(String(repeating: "  ", count: depth))\(t) \(size)\(note.isEmpty ? "" : " — " + note)")
+                if containers.contains(t) { walk(i + 8, i + size, depth + 1) }
+                if t == "mdat" { return }
+                i += size
+            }
+        }
+        walk(0, b.count, 0)
+        return out
+    }
+}

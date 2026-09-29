@@ -192,7 +192,7 @@ final class AuthE2E: NSObject, WKNavigationDelegate {
         }
     }
 
-    static func trackingParams(_ data: Data) -> [String: String] {
+    nonisolated static func trackingParams(_ data: Data) -> [String: String] {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let services = (root["responseContext"] as? [String: Any])?["serviceTrackingParams"] as? [[String: Any]] else { return [:] }
         var out: [String: String] = [:]

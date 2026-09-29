@@ -150,6 +150,7 @@ case "solve":
     let (lines, playable) = await SolverExperiment.runReturningURL(transport, videoID: id, playerPath: playerPath, solver: solver)
     lines.forEach { print($0) }
     if args.contains("--play"), let playable { await AVPlaybackTest.run(playable, label: "\(id) itag 141 sig+n") }
+    if args.contains("--mp4"), let playable { (await MP4Header.describe(playable)).forEach { print("  mp4 " + $0) } }
 case "authcheck":
     // Same requests anonymous vs. authenticated; only session state and shape are printed.
     let authed = anonymous.authenticated(auth)

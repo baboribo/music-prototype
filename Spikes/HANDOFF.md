@@ -310,7 +310,8 @@ playlistPanelVideoWrapperRenderer
 5. (완료) A7 checkpoint commit.
 6. (완료) A8 Write Actions: 좋아요·앨범/재생목록/믹스 저장·곡 보관함·다시 듣기 고정(A8.1–A8.7). 구독은 (c) 방향으로 미연결.
 7. (완료, 8절 C·C2) 앱 내부 인증/session: Simulator feasibility + 실기기 fresh-store E2E. 남은 항목은 C2 참조.
-8. B2 feasibility 결론: blocker는 sig/n뿐, 변환 시 200/206, macOS·**iPhone AVPlayer 재생** [확인] (B2 2차). SABR 미구현 결정. 다음: production solver architecture 결정 → background/lock·Now Playing·Remote Commands 등 소단위.
+8. B2 feasibility 결론: blocker는 sig/n뿐, 변환 시 200/206, macOS·**iPhone AVPlayer 재생** [확인] (B2 2차). SABR 미구현 결정.
+9. B3 native audio 1–8단계 [확인] (B3). 다음: 전환 지연 개선(solver 1회·전처리 캐시·prefetch) 결정 대기. Video/HLS/Song↔Video는 audio 안정화 후.
 
 ### C. In-app authentication / session (2026-09-29, `Spikes/WebPlayerSpike` 확장, 본 앱 미연결)
 목표: 사용자가 DevTools로 cookie를 복사하지 않고, 공개 iOS/WebKit API만으로 로그인·유지·만료·재인증·로그아웃. 개발용 `YTM_SESSION_FILE`은 유지.
@@ -408,6 +409,33 @@ spike 구성: `WebPlayerSpike/AuthProbe.swift`(기존 앱·bundle 재사용, 새
   - `item.duration` 506 s(실제 약 253 s, `approxDurationMs`와 불일치) — macOS와 같은 현상 [확인], fragmented MP4 길이 추정 문제로 보임 [가설].
   - 사용된 session 버그 수정: 식별자 store를 임시 인스턴스로 만들고 바로 놓으면 cookie 조회가 0개를 반환 [확인] → store를 참조로 유지.
   - 미검증: background/lock, Now Playing, Remote Commands, HLS(n 변환한 playlist를 AVPlayer에 주려면 playlist 재작성/로컬 proxy 필요), Opus(webm) 재생, 곡 길이·seek on device, URL 만료(`expire`, 약 6시간) 처리.
+
+#### B3 Native audio spike (2026-09-29, iPhone 15 Pro Max iOS 27.2, `WebPlayerSpike` Audio 탭, 본 앱 미통합)
+사용자 결정: production 1차 경로 = **Direct Format Resolver**, SABR 미구현. solver는 UI/Queue/Player와 분리된 `PlaybackResolver` 내부 구현(교체 가능), 외부 solver는 **고정 release + hash**만, 실패 시 resolution을 안전하게 실패. Audio 안정화 전까지 Video/HLS/Song↔Video 작업 금지.
+
+구조 (`PlaybackResolver.swift`): `PlaybackResolver`(actor) ← `SessionCookieSource`(WebKit store) · `PlayerJSProvider`(player id별 캐시, 30분마다 버전 확인) · `SignatureSolver`(`JSCSolver`: `SolverRelease.ejs080` 파일을 Caches/릴리스 URL에서 받아 sha256 일치 시에만 사용). 결과 `ResolvedAudio{url, itag, duration(approxDurationMs), title, artist, artworkURL, expiresAt}` / `ResolutionError`(signedOut, unplayable, noAudioFormat, solverUnavailable, solverFailed, unreachable…). URL을 돌려주기 전 range 0–1 probe로 잘못된 변환(403)을 걸러냄. 값(URL·sig·n·cookie)은 로그·파일에 없음. `NativeAudio.swift`: 3곡 queue, AVPlayer 1개, Now Playing, `MPRemoteCommandCenter`, 볼륨, 진단 로그 `Documents/audio.log`(상태·숫자만).
+
+| 단계 | 결과 |
+|---|---|
+| 1. pause/resume | [확인] pause 4 s drift 0, resume 후 진행 |
+| 2. seek | [확인] 120 s → +4 s 후 123.9 |
+| 3. 곡 종료·자동 Next | [확인, 수정 후] **AVPlayer duration 2배**(506.6/413.2/434.8 s = 서비스 길이×2): itag 141 MP4 header는 정상(mvhd·mdhd·sidx 모두 253.3 s, AAC-LC AOT 2 44.1 kHz, elst media_time 1600, 샘플 1024) — fragmented MP4인데 mvhd에 전체 길이가 있고 `mehd` 없음 → AVFoundation이 moov 길이 + fragment 길이를 더하는 것으로 보임 [가설]. 수정 전: 245 s로 seek 후 40 s 동안 end 없음, 위치 284.9 s까지 "playing". **수정: `AVPlayerItem.forwardPlaybackEndTime = approxDurationMs`** → 245.3 s seek 후 8.3 s 뒤 정확히 253.3 s에 `didPlayToEndTime` → 자동 Next 정상. UI·Now Playing 길이는 서비스 값 사용(잠금화면 약 4:14 표시, 사용자 확인). |
+| previous | [확인] 3 s 이후 = 처음으로, 3 s 이내 = 이전 곡(일반 semantics, 사용자 확인) |
+| 4–5. background·잠금 | 1차 실패 → 원인 [확인]: **빌드된 Info.plist에 `UIBackgroundModes`가 없었음**(`INFOPLIST_KEY_UIBackgroundModes` build setting이 생성 plist에 반영되지 않음). background 후 약 0.7 s에 시스템이 정지, 잠금에서 play 거부. 수정: target에 `Info.plist`(UIBackgroundModes=[audio]만) 연결 → 실행 시 `UIBackgroundModes: ["audio"]` 로그, background `bgTimeRemaining` 무제한, Home·잠금에서 계속 재생, background에서 곡 끝 → 자동 Next 정상 [확인, 사용자·로그]. **본 앱 MusicPrototype에는 background mode 설정 자체가 없음 → 연결 시 같은 방식 필요.** |
+| 6. Now Playing | [확인] 제목·아티스트·artwork·서비스 길이 표시 |
+| 7. 원격 제어 | [확인] 잠금화면·Control Center·Dynamic Island 재생/일시정지, 진행바 seek(`changePlaybackPosition`), next/previous |
+| 8. 시스템 볼륨 | [확인] 하드웨어 버튼·Control Center·앱 `MPVolumeView`, `outputVolume` KVO 이벤트 수신 |
+
+발견·수정한 크래시 [확인, 기기 crash report]:
+- `MPMediaItemArtwork` image handler가 MainActor 격리를 상속 → MediaPlayer가 자체 queue에서 호출할 때 Swift 6 isolation assert(`EXC_BREAKPOINT`). **handler는 nonisolated/@Sendable로 만들어야 함**(본 앱 적용 시 동일 주의).
+- 진단 로그에 NaN(아이템 없을 때 currentTime) → `JSONSerialization` 예외 → 크래시. 로그 값 정규화로 수정.
+- 곡을 불러오는 중 pause가 무시되던 문제: 재생 의도(`wantsPlayback`)를 따로 두어 수정.
+
+**Next/Previous 지연 분리** [확인, 원격 명령 5회]: 전체 4.3–4.9 s(사용자 체감 약 5 s) = 명령→queue 변경→resolve 시작 ~10 ms · `/player` 350–560 ms · player JS 0 ms(캐시) · **sig ~1,950 ms · n ~1,940 ms** · probe 35–95 ms · resolve 완료→item ready ~300 ms. → **약 85%가 기기 solver**. 원인: sig와 n을 따로 부르고 매번 새 JSContext에서 solver와 2.6 MB player JS 전체를 다시 파싱.
+- macOS 측정(node, 같은 solver) [확인]: player 전체 1회 ~260–300 ms, **ejs의 `preprocessed_player` 재사용 시 n+sig ~60 ms**(전처리 결과 3.6 MB, player 버전별 캐시 필요). 기기 추정: 곡당 solver ~0.4 s [가설, 미측정].
+- **자동 Next(곡 종료 후)도 같은 지연** [확인, 사용자 보고 + 로그]: `ended` 322.9 → 다음 곡 resolve 완료 327.3 → playing 327.5 = 곡 사이 **약 4.6 s 무음**. 자동 전환도 끝난 뒤에 resolve를 시작하는 같은 경로라 원인 동일. gapless와 거리가 멀어, 자동 전환에는 prefetch가 특히 필요.
+- 개선안(미구현, 사용자 결정 대기): (1) 곡당 solver 1회(n+sig 함께) (2) player 버전별 전처리 결과를 메모리·Caches에 보관, JSContext 재사용 (3) 그 뒤 다음 곡 미리 resolve(prefetch): URL 유효 약 6 h(`expire` 359분 관찰), queue 변경 시 무효화. (1)+(2)만으로 전환 ~1.2 s, prefetch 추가 시 ~0.3 s(item 준비)로 예상 [가설].
+
 
 production 관점 비용 (판단 재료, 미결정):
 - sig/n 변환은 player JS 갱신마다 따라가야 함: 외부 solver(ejs) 의존이면 yt-dlp 릴리스 주기, 자체 solver면 자체 유지. iOS에서는 JavaScriptCore로 같은 JS 실행 가능 [가설, 미검증].

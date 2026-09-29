@@ -22,10 +22,10 @@ struct SpikeRoot: View {
         TabView(selection: $tab) {
             Tab("Auth", systemImage: "person.badge.key", value: "auth") { AuthE2EView() }
             Tab("Player", systemImage: "play", value: "player") { SpikeView() }
-            Tab("Playback", systemImage: "waveform", value: "playback") { PlaybackSmokeView() }
+            Tab("Audio", systemImage: "waveform", value: "audio") { NativeAudioView() }
         }
         .onAppear {
-            if ProcessInfo.processInfo.environment["SPIKE_AUTOSMOKE"] == "1" { tab = "playback" }
+            if ProcessInfo.processInfo.environment["SPIKE_AUDIOTEST"] == "1" { tab = "audio" }
         }
     }
 }

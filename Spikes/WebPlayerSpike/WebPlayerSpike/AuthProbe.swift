@@ -103,7 +103,7 @@ final class AuthProbe: NSObject, WKHTTPCookieStoreObserver {
         }
     }
 
-    static func sapisidHash(_ cookies: [HTTPCookie], origin: String) -> String? {
+    nonisolated static func sapisidHash(_ cookies: [HTTPCookie], origin: String) -> String? {
         let ts = Int(Date().timeIntervalSince1970)
         let parts = [("SAPISIDHASH", "SAPISID"), ("SAPISID1PHASH", "__Secure-1PAPISID"), ("SAPISID3PHASH", "__Secure-3PAPISID")]
             .compactMap { scheme, name -> String? in
@@ -114,7 +114,7 @@ final class AuthProbe: NSObject, WKHTTPCookieStoreObserver {
         return parts.isEmpty ? nil : parts.joined(separator: " ")
     }
 
-    static func loggedIn(_ data: Data) -> String? {
+    nonisolated static func loggedIn(_ data: Data) -> String? {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let context = root["responseContext"] as? [String: Any],
               let services = context["serviceTrackingParams"] as? [[String: Any]] else { return nil }
