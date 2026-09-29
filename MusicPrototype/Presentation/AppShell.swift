@@ -6,6 +6,7 @@ private enum AppTab: Hashable {
 
 struct AppShell: View {
     @Environment(MockPlayer.self) private var player
+    @Environment(LibraryActions.self) private var actions
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityPrefersCrossFadeTransitions) private var prefersCrossFade
     @State private var selectedTab: AppTab = .home
@@ -17,6 +18,10 @@ struct AppShell: View {
     @State private var showingPlayer = false
     @State private var playerMode: PlayerMode = .artwork
     @State private var playerTransition = InteractivePlayerContext()
+
+    private var failureShown: Binding<Bool> {
+        Binding(get: { actions.failure != nil }, set: { if !$0 { actions.failure = nil } })
+    }
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -49,6 +54,13 @@ struct AppShell: View {
         }
         .tabViewSearchActivation(.searchTabSelection)
         .tabBarMinimizeBehavior(.onScrollDown)
+        // A write that failed has already been undone on screen; say so once.
+        .alert(actions.failure?.title ?? "", isPresented: failureShown, presenting: actions.failure) { _ in
+            Button("확인", role: .cancel) {}
+        } message: { failure in
+            Text(failure.message)
+        }
+        .sensoryFeedback(.error, trigger: actions.failure?.id) { _, new in new != nil }
         .tabViewBottomAccessory(isEnabled: player.currentTrack != nil) {
             MiniPlayer {
                 showingPlayer = true

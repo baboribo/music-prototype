@@ -257,12 +257,43 @@ playlistPanelVideoWrapperRenderer
 - header `subscribeButtonRenderer{subscribed, channelId, serviceEndpoints[subscribeEndpoint{channelIds, params}, signalServiceEndpoint→확인 dialog→unsubscribeEndpoint]}`. `channelId`는 **YouTube 채널**(아이유: 아티스트 페이지 `UCTUR0…`와 다른 `UC3SyT4…` = "이지금 [IU Official]") → YTM 구독 = YouTube 채널 구독.
 - probe: 원상태 `subscribed:false`, 구독 아티스트 3명 → `subscription/subscribe {channelIds}`(params 없이) HTTP 200, toast "이지금 [IU Official] 채널을 구독합니다.", 알림 상태 entity `SUBSCRIPTION_NOTIFICATION_STATE_OFF` → 직후 읽기는 아직 이전 상태, 재조회 시 `subscribed:true`·구독 아티스트 4명(아이유 선두) → `subscription/unsubscribe {channelIds}` 200 → `subscribed:false`, 구독 아티스트 목록이 원 응답과 동일.
 - **구독 응답에만 `runAttestationCommand{engagementType: ENGAGEMENT_TYPE_SUBSCRIBE, ids:[externalChannelId]}`** 포함(좋아요·저장·해제·feedback·구독 취소 응답에는 없음). web client는 이때 BotGuard 계열 attestation을 실행하는 것으로 보임 [가설]. 이번 probe는 attestation을 실행하지 않았고 서버는 구독을 적용했다. 즉 1회 attestation 없는 구독 이벤트가 계정에 기록됨.
-- 판단: attestation을 실행하거나 생략하는 구현은 합의된 "보호/anti-abuse 계층" 범위 → **앱 연결은 보류하고 사용자 결정 대기**. 선택지: (a) 구독 기능 제외(아티스트 ☆는 현재처럼 세션 표시 또는 숨김), (b) attestation 없이 요청(서버가 현재는 수용하지만 계정 신호·정책 위험, 향후 거부 가능), (c) in-app 인증(WKWebView)과 함께 공식 web의 구독 흐름을 페이지 안에서 수행하는 방식 검토(2단계 인증 조사와 묶음). 아티스트 ☆는 여전히 로컬 세션 상태.
+- 판단: attestation을 실행하거나 생략하는 구현은 합의된 "보호/anti-abuse 계층" 범위.
+- **사용자 결정 (2026-09-29): (c)**. attestation을 우회·생략한 구독 요청은 production 앱에 연결하지 않는다. 아티스트 ☆ 구독 버튼은 미연결(세션 표시) 유지. in-app WKWebView 로그인/session 조사에서 공식 web의 구독 흐름을 페이지 안에서 안전하게 쓸 수 있는지 함께 검토.
 
-#### A8 남은 항목 (사용자 결정 필요)
-- 곡 보관함 저장/삭제, 다시 듣기 고정/해제: `feedbackEndpoint` token 방식(최신 응답의 token). 현재 UI에 **진입점이 없음**(곡 행 `…` 메뉴에 해당 항목 없음, pin 표시만 있음) → 메뉴 항목 추가 위치 결정 필요.
-- 믹스 저장/해제(`playlistEditEndpoint ACTION_SET_EPHEMERAL_STATUS`): 믹스 페이지 header 버튼 형태 확인 후 `LibrarySaveButton` 재사용 가능성 [미확인].
-- 좋아요 목록에서 곡 제거 = unlike와 동일(A8.1 경로).
+#### A8 공통 구조 (A8.5에서 정리)
+- `LibraryActions`(MainActor, `@Observable`, 앱 root에서 한 개): 모든 쓰기의 수명주기 — 즉시 표시(`written[key]`) → 같은 key 진행 중 재탭 무시 → `catalog.apply(edit)` 성공 시 반환된 scope만 invalidate → 실패 시 이전 표시로 되돌리고 `failure` 설정. 좋아요·앨범/재생목록/믹스 저장·곡 보관함·고정 모두 이 경로(A8.1–2의 개별 구현을 대체).
+- **실패 UX**: 앱 root의 시스템 `.alert`(제목 = action별 "…하지 못했습니다", 본문 = `CatalogError` 문구, 버튼 "확인") + `.sensoryFeedback(.error)`. 되돌림은 alert 전에 이미 화면에 반영.
+- **token 수명**: `ServiceToggle{turnOn, turnOff: ServiceAction(token), isOn?}`은 **그 항목을 담은 응답 값 안에만** 존재(Track/HomeFeed). 쓰기 시 view가 자기 데이터의 toggle로 `LibraryEdit`를 만들어 바로 전달, `LibraryActions`는 token을 저장하지 않음. 성공 후 invalidate → 재로드된 응답의 새 token으로 다음 동작(Home 고정 → 해제에서 확인).
+- 로그: `Write` category에 action 종류와 목표 상태만(id·token 없음).
+- Scope: `.playlist(id)`, `.library`, `.home`(신규). Home은 `.home` revision이 바뀌면 제자리 재로드(실패 시 기존 유지).
+
+#### A8.5 곡 보관함 추가 / 삭제 [확인, 실제 계정 + Simulator live, 원상복구 확인]
+- 경로 [확인]: `feedback {feedbackTokens:[token]}` → `feedbackResponses[0].isProcessed == true`, toast `보관함에 추가되었습니다.` / `보관함에서 삭제되었습니다.` 앱은 `isProcessed`가 아니면 실패 처리.
+- **상태 판별 불가 [확인]**: 행 메뉴 toggle(`BOOKMARK_BORDER` "보관함에 저장")은 보관함에 있는 곡에서도 기본값이 "저장"(검색·보관함 노래·`/next` 모두, 추가 직후 재조회 포함). `frameworkUpdates`에도 상태 없음. → `ServiceToggle.isOn = nil`(모름). 보관함 노래 목록·보관함 scope 검색 결과에서 온 곡만 `isOn = true`(`LibraryParsing.inLibrary`). 모르는 곡은 메뉴에 "보관함에 추가", 쓰기 후에는 세션의 written 상태로 "보관함에서 삭제".
+- `liked`와 `inLibrary`는 별개 상태 유지(사용자 결정). 좋아요 취소는 보관함에서 자동 제거하지 않음(A8.1 semantics 그대로).
+- UI: 곡 행(`SongRow`) 기존 `…` 메뉴에 `보관함에 추가 / 보관함에서 삭제`(검색 top 결과 곡 포함 — top card 메뉴에도 toggle이 있어 파싱 추가).
+- probe(보라빛 밤 `wh7j1uEpNsQ`): 원상태 보관함 노래·검색에 없음, INDIFFERENT → 추가: 보관함 노래 첫 항목·보관함 검색 적중, **좋아요 INDIFFERENT 유지** → 삭제(최신 보관함 노래 응답의 toggled token): 보관함 노래 첫 page가 원 응답과 id 순서까지 동일.
+- Simulator live: 검색 "pporappippam" → 첫 행 `…` → 보관함에 추가 → `feedback` 1회 → 서버 보관함 노래 첫 항목 → 같은 메뉴가 "보관함에서 삭제"로 바뀜 → 탭 → `feedback` 1회 → 서버 원상태(첫 page 동일).
+- 참고: Simulator 입력 도구의 탭이 메뉴 등장 애니메이션 중이면 항목 대신 dismiss로 처리되는 경우가 있었음(두 번째 항목 좌표로 재시도해 해결) — 앱 문제 아님으로 판단 [가설, 실기기 미확인].
+
+#### A8.6 다시 듣기 고정 / 해제 [확인, 실제 계정 + Simulator live/replay/mock, 원상복구 확인]
+- 경로 [확인]: `feedback` token(`KEEP` = 고정, `KEEP_OFF` = 해제 — toggle 기본 icon이 현재 상태의 반대 action). toast `다시 듣기에 고정됨` / `다시 듣기에서 고정 해제됨`.
+- probe: 고정 → `FEmusic_listen_again` 선두로 이동, 해제 → 원래 위치(5번째)로 복귀, 항목 집합·항목별 고정 상태 동일. **다시 듣기 순서의 일부 인접 swap은 쓰기 없이 연속 조회만 해도 바뀜**(q3 vs q4) → 원상복구 기준은 "집합 + 항목별 고정 상태"로 판정. 보관함 landing 고정 목록은 이 항목(곡)에 대해 변화 없음.
+- UI (사용자 결정 반영): 3×3 `빠른 선곡` — tap = 재생/이동(기존), **long press = 시스템 context menu `다시 듣기에 고정 / 고정 해제`**, 별도 버튼 없음, 고정 항목은 기존 작은 pin 표시만. Home의 다른 카드 shelf(`Shelf`)도 같은 `pinContextMenu` modifier 공유(서버 toggle 있는 카드만). 목록형 곡 행은 기존 `…` 메뉴에 같은 `PinButton`. `HomeFeed.pins`(item id → toggle), `Track.pinToggle`.
+- Simulator live: Cheer squad 타일 long press → 메뉴 "다시 듣기에 고정"(재생 요청 없음) → `feedback` 1회 → Home `.home` invalidate로 5요청 재로드 → 타일이 선두로 이동하며 pin 표시 → 서버 `KEEP_OFF`·선두 → 다시 long press → 메뉴가 "다시 듣기에서 고정 해제"(재로드 응답의 새 token) → `feedback` 1회 → 재로드 → 서버 고정 3개로 복귀, 항목별 고정 상태 원 응답과 동일. 가로 paging swipe는 동작 없음, 일반 tap은 `next` 1회(재생) — gesture 충돌 없음.
+- replay: 해제 시도 → `notRecorded` → pin 표시 유지 + alert "고정을 해제하지 못했습니다 / 이 요청은 녹화된 응답이 없습니다." 확인.
+- Mock: fixture 카드에 서버 toggle 없음 → long press 메뉴 없음, 표시 동일.
+
+#### A8.7 믹스 보관함 저장 / 해제 [확인, 실제 계정 + Simulator live, 원상복구 확인]
+- 사전 조사의 `playlistEditEndpoint ACTION_SET_EPHEMERAL_STATUS`는 **이미 보관함에 있는 믹스**(보관 콘텐츠의 몽환적인 믹스)의 header에서만 관찰. 보관함에 없는 믹스(`RDTMAK…`) header toggle은 **재생목록과 같은 `likeEndpoint{LIKE/INDIFFERENT, target.playlistId}`**. `browse/edit_playlist`에 ephemeral 요청을 보내면 HTTP 400 INVALID_ARGUMENT(상태 변화 없음) → 사용하지 않음.
+- 앱: 믹스 상세의 기존 `+ / ✓`(`LibrarySaveButton`) 재사용. 변경점: 재생목록 페이지에서 서버 `membership`이 있으면 kind 추정(`isListenersOwn`, 믹스 → 자기 것으로 추정)보다 우선. 같은 interaction grammar(즉시 전환, 실패 시 되돌림 + alert).
+- probe(리듬에 몸을 맡기는 밤) + Simulator live(혼란과 소음 사이의 강렬한 에너지, 맞춤 믹스 shelf에서 진입): + 탭 → `like/like` 1회, ✓, 서버 toggle on·보관함 재생목록 3번째·landing 선두 → ✓ 탭 → `like/removelike` 1회, 서버 toggle off, **재생목록 첫 page·landing이 원 응답과 동일**.
+- 미확인: 이미 보관함에 있는 믹스(header가 ephemeral endpoint)의 해제 — 앱은 `likeEndpoint` target만 membership으로 읽으므로 그 경우 버튼 없음(보관 믹스를 해제하면 되돌릴 저장 경로가 like인지 확인 필요, 계정 상태 변경을 피하려고 실행 안 함).
+
+#### A8 마무리 계정 상태 확인 (2026-09-29, probe)
+- 원 응답과 동일: 보관함 노래 첫 page, 보관함 앨범, 보관함 재생목록, landing, 다시 듣기 항목별 고정 상태, 구독 아티스트.
+- 좋아요 목록만 1,111 → 1,112곡: 선두에 散歩の邪魔(`W5LokuZxi0k`) 추가, 기존 100번째가 첫 page 밖으로 밀림. 이 곡은 앱·probe의 어떤 쓰기 로그에도 없고, 06:23(마지막 원복)~08:48 사이 쓰기 없음 → **계정 소유자의 다른 기기 활동으로 판단, 건드리지 않음**. (같은 곡이 보관함 노래에도 선두로 나타난 것과 일치.)
+- 실행하지 않은 것: 재생목록 삭제, 관심 없음/추천 안 함, 재생목록 곡 삭제, attestation 우회 구독.
 
 #### 남은 작업 (2026-09-28)
 1. (완료) 보관함 검색 → 서버 보관함 탭(A6.7).
@@ -272,7 +303,8 @@ playlistPanelVideoWrapperRenderer
 3. 쓰기 동작 미구현 — A6.5-4 inventory 기준으로 범위 결정 필요(재생목록 삭제·추천 안 함은 비가역).
 4. B2 실험(sig/n만 적용 시 200 여부) — 사용자 승인 대기.
 5. (완료) A7 checkpoint commit.
-6. A8 진행 중: 좋아요(A8.1)·앨범 저장(A8.2)·재생목록 저장(A8.3) 완료, 구독(A8.4) attestation으로 보류, 곡 보관함·고정·믹스 저장은 UI 진입점 결정 대기. 이후 앱 내부 인증/session 조사 → B2 Playback feasibility spike(승인됨, 별도 spike).
+6. (완료) A8 Write Actions: 좋아요·앨범/재생목록/믹스 저장·곡 보관함·다시 듣기 고정(A8.1–A8.7). 구독은 (c) 방향으로 미연결.
+7. 다음: 앱 내부 인증/session 조사(WKWebView, 공식 web 구독 흐름 검토 포함) → B2 Playback feasibility spike(승인됨, 별도 spike).
 
 ### B. Native playback spike (본 앱과 분리)
 조사 [가설 — 외부 자료, 이 환경 미검증]:

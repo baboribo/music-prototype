@@ -6,6 +6,8 @@ struct HomeFeed: Sendable {
     var sections: [HomeSection]
     /// Fixture feeds say so on screen; live feeds don't.
     var isSample = false
+    /// Each card's 다시 듣기 pin switch, by item id (`BrowseItem.id` / `QuickPick.id`).
+    var pins: [String: ServiceToggle] = [:]
 }
 
 struct HomeSection: Identifiable, Sendable {
@@ -168,12 +170,31 @@ enum CatalogError: LocalizedError {
     }
 }
 
+/// An action the service offered on an item in one response. Opaque to views;
+/// only the catalog that issued it can use it, and it isn't kept past that response's use.
+struct ServiceAction: Hashable, Sendable {
+    let token: String
+}
+
+/// A two-way switch the service offers on an item (보관함 저장, 다시 듣기 고정):
+/// the action for each direction from the same response, and the state when the service says.
+struct ServiceToggle: Hashable, Sendable {
+    let turnOn: ServiceAction
+    let turnOff: ServiceAction
+    /// Nil when the response doesn't say (a song's library state outside the library).
+    var isOn: Bool?
+}
+
 /// A reversible change to the listener's account. Each case has an exact inverse.
 enum LibraryEdit: Hashable, Sendable {
     /// Like (`true`) or remove the like from a song or video.
     case like(Track.ID, Bool)
     /// Save (`true`) a release or playlist to the library, or remove it.
     case save(listID: String, Bool)
+    /// Add a song to the library (`true`) or remove it; independent of its like.
+    case songInLibrary(ServiceToggle, Bool)
+    /// Pin an item to 다시 듣기 (`true`) or unpin it.
+    case pin(ServiceToggle, Bool)
 }
 
 /// Data a write can make stale. Views holding that data reload when its revision changes.
@@ -182,6 +203,8 @@ enum CatalogScope: Hashable, Sendable {
     case playlist(Playlist.ID)
     /// The library root, its category lists and library-scoped search.
     case library
+    /// Home (다시 듣기 order and pins).
+    case home
 }
 
 /// Revisions per scope; a completed write bumps the scopes it affected.
@@ -327,6 +350,9 @@ struct MockMusicCatalog: MusicCatalog {
     func apply(_ edit: LibraryEdit) async throws -> Set<CatalogScope> {
         switch edit {
         case .like: return [.playlist("liked"), .library]
+        // Fixture rows and cards offer no service switches.
+        case .songInLibrary: return [.library]
+        case .pin: return [.home, .library]
         case .save(let id, let saved):
             MockSaves.ids.withLock { ids in
                 if saved { ids.insert(id) } else { ids.remove(id) }

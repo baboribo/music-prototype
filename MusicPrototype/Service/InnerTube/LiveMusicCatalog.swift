@@ -52,9 +52,12 @@ struct LiveMusicCatalog: MusicCatalog {
         let params = scope == .library ? SearchParsing.libraryParams[filter] : SearchParsing.params[filter]
         if let params { body["params"] = .string(params) }
         var results = SearchParsing.results(try await client.post("search", body: body))
-        if scope == .library, filter == .playlists {
-            // No playlist chip is known for the library tab; narrow its own results by kind.
-            results.items = results.items.filter { if case .playlist = $0 { true } else { false } }
+        if scope == .library {
+            results.items = results.items.map(LibraryParsing.inLibrary)
+            if filter == .playlists {
+                // No playlist chip is known for the library tab; narrow its own results by kind.
+                results.items = results.items.filter { if case .playlist = $0 { true } else { false } }
+            }
         }
         return results
     }
@@ -142,12 +145,26 @@ struct LiveMusicCatalog: MusicCatalog {
                                       body: ["target": .object(["videoId": .string(videoID)])])
             return [.playlist("VLLM"), .library]
         case .save(let listID, let saved):
-            // Verified 2026-09-29 (album): the album appears in 보관함 앨범, the library
-            // landing and library search; removing restores the landing exactly.
+            // Verified 2026-09-29 for an album, another listener's playlist and a mix
+            // (RDTMAK…): all save by playlistId; removing restores the library exactly.
             _ = try await client.post(saved ? "like/like" : "like/removelike",
                                       body: ["target": .object(["playlistId": .string(listID)])])
             return [.library]
+        case .songInLibrary(let toggle, let on):
+            // Verified 2026-09-29: adds to / removes from 보관함 노래 and library search;
+            // the like is untouched. No row in any response shows the resulting state.
+            try await feedback(on ? toggle.turnOn : toggle.turnOff)
+            return [.library]
+        case .pin(let toggle, let on):
+            // Verified 2026-09-29: a pinned item leads 다시 듣기 (Home) and the library landing.
+            try await feedback(on ? toggle.turnOn : toggle.turnOff)
+            return [.home, .library]
         }
+    }
+
+    private func feedback(_ action: ServiceAction) async throws {
+        let response = try await client.post("feedback", body: ["feedbackTokens": .array([.string(action.token)])])
+        guard response.at("feedbackResponses.0.isProcessed") == .bool(true) else { throw CatalogError.unexpectedResponse }
     }
 
     func artist(_ id: Artist.ID) async throws -> ArtistDetail {
@@ -224,6 +241,7 @@ enum HomeParsing {
 
     static func feed(_ shelves: [JSON]) -> HomeFeed {
         var sections: [HomeSection] = []
+        var pins: [String: ServiceToggle] = [:]
         for (index, node) in shelves.enumerated() {
             guard let shelf = node["musicCarouselShelfRenderer"] else { continue }
             let title = shelf.at("header.musicCarouselShelfBasicHeaderRenderer.title")?.text ?? ""
@@ -233,6 +251,7 @@ enum HomeParsing {
                 // The 3×3 grid, first on Home (H1); pinned items already lead.
                 let picks = contents.compactMap { node -> QuickPick? in
                     guard let card = node["musicTwoRowItemRenderer"], let item = ItemParsing.card(card) else { return nil }
+                    pins[item.id] = ItemParsing.pinToggle(card)
                     return QuickPick(item, pinned: ItemParsing.isPinned(card))
                 }
                 guard !picks.isEmpty else { continue }
@@ -245,12 +264,16 @@ enum HomeParsing {
                 sections.append(HomeSection(id: id, title: isSongQuickPicks(shelf) ? quickPicksTitle : title,
                                             content: .songs(tracks, rowsPerPage: rows ?? 4)))
             } else {
-                let items = contents.compactMap { $0["musicTwoRowItemRenderer"].flatMap(ItemParsing.card) }
+                let items = contents.compactMap { node -> BrowseItem? in
+                    guard let card = node["musicTwoRowItemRenderer"], let item = ItemParsing.card(card) else { return nil }
+                    if pins[item.id] == nil { pins[item.id] = ItemParsing.pinToggle(card) }
+                    return item
+                }
                 guard !items.isEmpty else { continue }
                 sections.append(HomeSection(id: id, title: title, content: .items(items)))
             }
         }
-        return HomeFeed(sections: sections)
+        return HomeFeed(sections: sections, pins: pins)
     }
 
     /// The listen-again module: its "more" button browses `FEmusic_listen_again`.
@@ -296,7 +319,8 @@ enum ReleaseParsing {
                   artistID: track.artistID ?? artistID,
                   album: header["title"]?.text ?? "", releaseID: id,
                   artwork: track.artwork == .theme(.midnight) ? artwork : track.artwork,
-                  duration: track.duration, isExplicit: track.isExplicit, isPlayable: track.isPlayable)
+                  duration: track.duration, isExplicit: track.isExplicit, isPlayable: track.isPlayable,
+                  libraryToggle: track.libraryToggle, pinToggle: track.pinToggle)
         }
         let release = Release(
             id: id, title: header["title"]?.text ?? "",
@@ -416,8 +440,15 @@ enum LibraryParsing {
             if let card = node["musicTwoRowItemRenderer"] { return ItemParsing.card(card) }
             if let row = node["musicResponsiveListItemRenderer"] { return ItemParsing.row(row) }
             return nil
-        }
+        }.map(inLibrary)
         return LibraryPage(items: items, next: token.map(CatalogContinuation.init))
+    }
+
+    /// Songs listed in the library are in it, whatever their row menus say.
+    static func inLibrary(_ item: BrowseItem) -> BrowseItem {
+        guard case .track(var track) = item, track.libraryToggle != nil else { return item }
+        track.libraryToggle?.isOn = true
+        return .track(track)
     }
 
     /// First pages nest a grid or shelf in the section list; continuations return it directly.

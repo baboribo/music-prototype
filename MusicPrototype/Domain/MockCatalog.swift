@@ -30,6 +30,10 @@ struct Track: Identifiable, Hashable, Sendable {
     var isExplicit = false
     /// The service greys out rows it won't play here (region, removed uploads).
     var isPlayable = true
+    /// The row's 보관함에 저장 / 삭제 switch, when the service offered one.
+    var libraryToggle: ServiceToggle? = nil
+    /// The row's 다시 듣기에 고정 / 해제 switch, when the service offered one.
+    var pinToggle: ServiceToggle? = nil
 }
 
 /// YouTube Music labels releases as Album, Single or EP; the page grammar is shared.

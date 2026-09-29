@@ -65,7 +65,8 @@ enum ItemParsing {
         return .track(Track(id: videoID, title: title.text ?? "",
                             artist: artists.isEmpty ? byline.first ?? "" : artists.map(\.name).joined(separator: ", "),
                             artistID: artists.first?.id, album: "", releaseID: nil,
-                            artwork: artwork, duration: nil, isExplicit: isExplicit(card)))
+                            artwork: artwork, duration: nil, isExplicit: isExplicit(card),
+                            libraryToggle: libraryToggle(card), pinToggle: pinToggle(card)))
     }
 
     /// Album, playlist or artist from a title and a "종류 • 아티스트 • 연도" byline.
@@ -126,7 +127,8 @@ enum ItemParsing {
             // Fixed column on albums/search; a flex column on playlist rows.
             duration: (seconds(fixed) ?? columns.dropFirst().lazy.compactMap { seconds($0.text) }.first).map(Double.init),
             isExplicit: isExplicit(node),
-            isPlayable: node["musicItemRendererDisplayPolicy"]?.string != "MUSIC_ITEM_RENDERER_DISPLAY_POLICY_GREY_OUT")
+            isPlayable: node["musicItemRendererDisplayPolicy"]?.string != "MUSIC_ITEM_RENDERER_DISPLAY_POLICY_GREY_OUT",
+            libraryToggle: libraryToggle(node), pinToggle: pinToggle(node))
     }
 
     // MARK: Fields
@@ -151,6 +153,30 @@ enum ItemParsing {
     /// Pinned with "다시 듣기에 고정". The menu toggle is authoritative: it offers
     /// `KEEP_OFF` (unpin) when pinned. The "고정됨" badge is missing on some pinned
     /// library items, so it's only a fallback when the menu has no toggle.
+    /// The item's 다시 듣기 pin switch (`KEEP` = pin, `KEEP_OFF` = unpin).
+    static func pinToggle(_ node: JSON) -> ServiceToggle? {
+        toggle(node, off: "KEEP", on: "KEEP_OFF", knowsState: true)
+    }
+
+    /// A song row's 보관함 저장/삭제 switch. Its default is always "저장" (`BOOKMARK_BORDER`),
+    /// even for songs already in the library, so the state stays unknown here.
+    static func libraryToggle(_ node: JSON) -> ServiceToggle? {
+        toggle(node, off: "BOOKMARK_BORDER", on: "BOOKMARK", knowsState: false)
+    }
+
+    /// A menu toggle's two feedback actions. Its default side is the action for the current state.
+    private static func toggle(_ node: JSON, off: String, on: String, knowsState: Bool) -> ServiceToggle? {
+        let toggles = (node.at("menu.menuRenderer.items")?.array ?? []).compactMap { $0["toggleMenuServiceItemRenderer"] }
+        guard let item = toggles.first(where: { [off, on].contains($0.at("defaultIcon.iconType")?.string) }),
+              let first = item.at("defaultServiceEndpoint.feedbackEndpoint.feedbackToken")?.string,
+              let second = item.at("toggledServiceEndpoint.feedbackEndpoint.feedbackToken")?.string
+        else { return nil }
+        let isOn = item.at("defaultIcon.iconType")?.string == on
+        return ServiceToggle(turnOn: ServiceAction(token: isOn ? second : first),
+                             turnOff: ServiceAction(token: isOn ? first : second),
+                             isOn: knowsState ? isOn : nil)
+    }
+
     static func isPinned(_ node: JSON) -> Bool {
         let toggles = (node.at("menu.menuRenderer.items")?.array ?? []).compactMap { $0["toggleMenuServiceItemRenderer"] }
         if let icon = toggles.lazy.compactMap({ $0.at("defaultIcon.iconType")?.string }).first(where: { $0 == "KEEP" || $0 == "KEEP_OFF" }) {

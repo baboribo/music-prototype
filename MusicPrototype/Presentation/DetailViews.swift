@@ -175,12 +175,13 @@ struct PlaylistDetailView: View {
             VStack(spacing: 0) {
                 DetailHeader(artwork: playlist.artwork, title: playlist.title, subtitle: playlist.owner)
                 PlaybackActions(shuffle: { play(shuffled: true) }, play: { play(shuffled: false) }) {
-                    if playlist.isListenersOwn {
-                        // Own lists are already in the library; Apple shows download here.
+                    // A save switch from the service wins (others' playlists, mixes); own lists
+                    // are already in the library, where Apple shows download.
+                    if let membership = detail.membership {
+                        LibrarySaveButton(membership: membership)
+                    } else if playlist.isListenersOwn {
                         Image(systemName: "arrow.down").font(.body.weight(.semibold)).foregroundStyle(.tertiary)
                             .accessibilityLabel("다운로드 (샘플에서는 사용할 수 없음)")
-                    } else if let membership = detail.membership {
-                        LibrarySaveButton(membership: membership)
                     }
                 }
                 .padding(.top, 18)

@@ -222,22 +222,20 @@ struct PlaybackActions<Trailing: View>: View {
 }
 
 /// "저장" to the YouTube Music library, kept in session state only.
-/// Saves a release or playlist to the library on the service. The icon changes at once
-/// and reverts if the write fails; taps wait for the write in flight.
+/// Saves a release or playlist to the library on the service (see `LibraryActions`).
 struct LibrarySaveButton: View {
-    @Environment(\.musicCatalog) private var catalog
-    @Environment(CatalogChanges.self) private var changes
+    @Environment(LibraryActions.self) private var actions
     let membership: LibraryMembership
-    @State private var isSaved: Bool
-    @State private var isWriting = false
 
-    init(membership: LibraryMembership) {
-        self.membership = membership
-        _isSaved = State(initialValue: membership.isSaved)
-    }
+    private var key: LibraryActions.Key { .save(listID: membership.listID) }
+    private var isSaved: Bool { actions.value(key, given: membership.isSaved) ?? false }
 
     var body: some View {
-        Button(action: toggle) {
+        Button {
+            let saved = isSaved
+            actions.perform(.save(listID: membership.listID, !saved), showing: !saved, for: key, from: saved,
+                            failureTitle: saved ? "보관함에서 삭제하지 못했습니다" : "보관함에 저장하지 못했습니다")
+        } label: {
             Image(systemName: isSaved ? "checkmark" : "plus")
                 .font(.body.weight(.semibold))
                 .contentTransition(.symbolEffect(.replace))
@@ -246,19 +244,31 @@ struct LibrarySaveButton: View {
         .buttonStyle(.plain)
         .accessibilityLabel(isSaved ? "보관함에서 삭제" : "보관함에 저장")
     }
+}
 
-    private func toggle() {
-        guard !isWriting else { return }
-        let saved = !isSaved
-        isSaved = saved
-        isWriting = true
-        Task {
-            defer { isWriting = false }
-            do {
-                changes.invalidate(try await catalog.apply(.save(listID: membership.listID, saved)))
-            } catch {
-                isSaved = !saved
-            }
+/// 다시 듣기에 고정 / 고정 해제, for a row's `…` menu or a card's context menu.
+struct PinButton: View {
+    @Environment(LibraryActions.self) private var actions
+    let itemID: String
+    let toggle: ServiceToggle
+
+    var body: some View {
+        let key = LibraryActions.Key.pin(itemID: itemID)
+        let pinned = actions.value(key, given: toggle.isOn) ?? false
+        Button(pinned ? "다시 듣기에서 고정 해제" : "다시 듣기에 고정", systemImage: pinned ? "pin.slash" : "pin") {
+            actions.perform(.pin(toggle, !pinned), showing: !pinned, for: key, from: pinned,
+                            failureTitle: pinned ? "고정을 해제하지 못했습니다" : "다시 듣기에 고정하지 못했습니다")
+        }
+    }
+}
+
+extension View {
+    /// Long press on a Home card: its pin switch, when the service offered one. Tap keeps its action.
+    @ViewBuilder func pinContextMenu(itemID: String, toggle: ServiceToggle?) -> some View {
+        if let toggle {
+            contextMenu { PinButton(itemID: itemID, toggle: toggle) }
+        } else {
+            self
         }
     }
 }
@@ -270,6 +280,7 @@ struct SongRow: View {
     enum Leading { case number(Int), artwork }
 
     @Environment(MockPlayer.self) private var player
+    @Environment(LibraryActions.self) private var actions
     @Environment(\.browseNavigate) private var navigate
     let track: Track
     let leading: Leading
@@ -382,6 +393,18 @@ struct SongRow: View {
             if let artistID = track.artistID {
                 Button("아티스트로 이동", systemImage: "music.microphone") { navigate(.artist(artistID)) }
             }
+            if let toggle = track.libraryToggle {
+                let key = LibraryActions.Key.songInLibrary(track.id)
+                let inLibrary = actions.value(key, given: toggle.isOn) ?? false
+                Button(inLibrary ? "보관함에서 삭제" : "보관함에 추가",
+                       systemImage: inLibrary ? "minus.circle" : "plus") {
+                    actions.perform(.songInLibrary(toggle, !inLibrary), showing: !inLibrary, for: key, from: inLibrary,
+                                    failureTitle: inLibrary ? "보관함에서 삭제하지 못했습니다" : "보관함에 추가하지 못했습니다")
+                }
+            }
+            if let toggle = track.pinToggle {
+                PinButton(itemID: "track.\(track.id)", toggle: toggle)
+            }
         } label: {
             Image(systemName: "ellipsis")
                 .font(.body.weight(.semibold))
@@ -426,6 +449,8 @@ struct Shelf: View {
     @Environment(MockPlayer.self) private var player
     let items: [BrowseItem]
     var tileWidth: CGFloat = BrowseMetrics.shelfTile
+    /// Home cards' pin switches, by item id (long press).
+    var pins: [String: ServiceToggle] = [:]
 
     var body: some View {
         ScrollView(.horizontal) {
@@ -435,10 +460,12 @@ struct Shelf: View {
                     if let route = item.route {
                         NavigationLink(value: route) { ItemTile(item: item, width: width) }
                             .buttonStyle(.plain)
+                            .pinContextMenu(itemID: item.id, toggle: pins[item.id])
                             .accessibilityIdentifier(item.id)
                     } else if case .track(let track) = item {
                         Button { player.startMix(from: track) } label: { ItemTile(item: item, width: width) }
                             .buttonStyle(.plain)
+                            .pinContextMenu(itemID: item.id, toggle: pins[item.id])
                             .accessibilityIdentifier(item.id)
                     }
                 }
