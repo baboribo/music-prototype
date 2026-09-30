@@ -3,7 +3,7 @@ import SwiftUI
 // Section rhythm, list and tile geometry follow Apple Music's shelves (IMG_4060);
 // the shelves, their order and their tap semantics are YouTube Music's.
 struct HomeView: View {
-    @Environment(MockPlayer.self) private var player
+    @Environment(PlayerModel.self) private var player
     @Environment(\.musicCatalog) private var catalog
     @Environment(CatalogChanges.self) private var changes
     @Environment(AccountSession.self) private var account
@@ -177,7 +177,7 @@ struct HomeView: View {
 
 /// Tap plays or opens; long press offers 다시 듣기 고정 when the service does.
 private struct QuickPickTile: View {
-    @Environment(MockPlayer.self) private var player
+    @Environment(PlayerModel.self) private var player
     @Environment(LibraryActions.self) private var actions
     let item: QuickPick
     let toggle: ServiceToggle?

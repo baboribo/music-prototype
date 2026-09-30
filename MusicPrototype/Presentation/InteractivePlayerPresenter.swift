@@ -226,7 +226,7 @@ struct InteractivePlayerPresenter<Content: View>: UIViewControllerRepresentable 
                 guard phase == .idle, let attachment,
                       attachment.viewIfLoaded?.window != nil,
                       attachment.presentedViewController == nil else { return }
-                let host = UIHostingController(rootView: parent.content())
+                let host = PlayerHostingController(rootView: parent.content())
                 host.overrideUserInterfaceStyle = .dark
                 host.modalPresentationStyle = .custom
                 host.modalPresentationCapturesStatusBarAppearance = true
@@ -432,6 +432,20 @@ final class PlayerPresenterAttachment: UIViewController {
 }
 
 @MainActor
+/// The presented player. Its status bar is fixed here (light content over the always-dark player)
+/// rather than read from SwiftUI preferences: UIKit updates the captured status bar as an alongside
+/// animation of the presentation, and can run it while the first render inside `animateTransition`
+/// is still creating UIKit-backed controls (`UISlider` init runs an animation block). Answering from
+/// SwiftUI at that point re-entered the graph mid-update; with a `GeometryReader` whose content is
+/// conditional, that evaluation created the progress slider a second time, and neither instance
+/// received `updateUIView` again (a frozen position bar).
+final class PlayerHostingController<Content: View>: UIHostingController<Content> {
+    override var childForStatusBarStyle: UIViewController? { nil }
+    override var childForStatusBarHidden: UIViewController? { nil }
+    override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
+    override var prefersStatusBarHidden: Bool { false }
+}
+
 final class PlayerSurfacePresentationController: UIPresentationController {
     /// Reference recording: the uncovered browse page drops from luma 34 to 13
     /// (≈ black at 0.6) within ~170ms of opening, stays dimmed while a drag

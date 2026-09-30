@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct MiniPlayer: View {
-    @Environment(MockPlayer.self) private var player
+    @Environment(PlayerModel.self) private var player
     @Environment(\.tabViewBottomAccessoryPlacement) private var placement
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.interactivePlayerTransitionContext) private var transitionContext

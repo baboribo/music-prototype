@@ -544,6 +544,42 @@ AccountSession (Domain, @Observable) ← AccountBackend(protocol) ← WebKitAcco
 - 실기기 E2E [확인, 사용자]: signedOut 화면 → 로그인(앱 안 sheet) → Home 실데이터 → 앱 완전 종료 후 재실행 시 로그인 유지 → 계정 메뉴 로컬 로그아웃 → signedOut → 앱 재시작 없이 재로그인 → Home 실데이터.
 - 미검증/후속(유지): 브랜드 채널(`X-Goog-PageId` 경로 코드만 있음), 장기 cookie 회전·만료, 서버 측 logout(하지 않음), 다른 기기 승인 2FA의 universal link 경로, Google 내장 WebView 차단 화면 안내.
 
+### P2/P3. Native Audio 본 앱 통합 — checkpoint (2026-10-01)
+
+> P2(native audio engine)·P3(기존 UI 연결, audio only) checkpoint. 자동 실기기 점검과 사용자 수동 확인 모두 통과. Native Video / Song↔Video / SABR / AVAudioEngine / POT는 범위 밖(미착수).
+
+변경 범위(요약):
+- Playback: `Playback/PlayerModel.swift`(구 `MockPlayer`, queue는 source of truth 유지), `Playback/PlaybackEngine.swift`(protocol + `SilentPlaybackEngine`), `Playback/Engine/NativeAudioEngine.swift`(AVQueuePlayer, next 1개 prefetch·invalidation·URL 만료, Now Playing, Remote Commands, iOS 27 session 알림), `Playback/Engine/GaplessLoader.swift`(검증된 layout만 `edts`→`iTunSMPB`, 그 외 직접 URL fallback), `Playback/Resolver/PlaybackResolver.swift`·`JSCSolver.swift`(spike에서 추출, credential은 `SessionCredentialStore`), `Playback/Debug/PlayerSelfTest.swift`(DEBUG 전용 자동 점검 `YTM_PLAYER_TEST=1`).
+- 앱 설정: `MusicPrototype-Info.plist`(`UIBackgroundModes=[audio]`, built bundle에서 확인), pbxproj `INFOPLIST_FILE`.
+- UI: Full Player를 `FullPlayer`(composition)·`PlayerMetrics`·`PlayerControls`·`PlayerProgress`(+`PlaybackProgressSlider`)·`SystemVolumeSlider`(+`CenteredVolumeView`)로 분리, `InteractivePlayerPresenter`의 `PlayerHostingController`(status bar 고정), `PlayerUpperContent.swift`(metrics·문구), AppShell(재생 실패 alert, sign-out 시 `player.reset()`, DEBUG self-test hook), 나머지 View는 `MockPlayer`→`PlayerModel` 이름만.
+
+실기기/계측으로 확인된 수정(유지 대상):
+- stale timestamp: 준비 안 된 곡 선택 시 이전 item을 즉시 pause, observer는 실제 current(wanted) item의 시간만 반영 → stale 샘플 0.
+- seek race: seek 진행 중 observer 덮어쓰기 차단(`seekTarget`), 막대 drag는 로컬 scrub 후 release 시 1회 seek.
+- prefetch ordering: 선택한 곡이 실제 재생된 뒤에만 다음 곡 prefetch, start 시 준비된 next를 current 뒤에 재삽입 → gapless advance 2 ms.
+- 남은 시간: 같은 정수 초 기준(경과+남은=총 길이).
+- volume: `MPVolumeView`는 44pt row에서 slider를 y −5(높이 28)로 상단 배치 → `volumeSliderRect(forBounds:)` override로 세로 중앙(8…36) [실기기 로그·스크린샷 확인, track 1747px = 아이콘, x 124–780 vs reference 122–783].
+- engine vs AVPlayer 시간 차 ≤0.1 s(seek in flight 제외), observer 주기는 원래 0.5 s 유지(콜백이 media time 배수에 정확히 떨어져 초 표시는 제때 바뀜).
+
+**progress bar freeze — 원인 확정·수정 (framework 재진입, 최소 재현으로 확인)**
+- 증상: Full Player의 progress 막대가 열린 순간 값에서 멈춤(시간 텍스트는 정상). 기존 commit 코드부터 존재. `PlaybackProgressSlider`는 value/duration/callback만 받는 dumb component로 유지 — 문제는 component가 아니었다.
+- 이전 결론 "iOS 27 thumbless slider bug"는 틀렸음(철회 유지).
+- 앱 bisect(로그 카운터, 비시각): 접근성 modifier·DEBUG `onChange`·dismiss region·host `rootView` 재할당·artwork nested host·queue `List`·identity row 모두 무관. `PlayerUpperContent`의 `GeometryReader` 안 **조건부 content**(ZStack 내부 `if`)가 있으면 freeze, 없으면 정상. 그리고 presenter를 animated:false로 하면 정상 → animator 안 `surface.layoutIfNeeded()` 제거 시 정상.
+- 메커니즘(`makeUIView` call stack 캡처): `animateTransition` → `surface.layoutIfNeeded()` → SwiftUI render → `makeUIView` → `UISlider.init`(`_UIFluidSliderInteraction`)가 내부 UIView animation block을 닫음 → UIKit이 presentation의 **alongside animation(= `modalPresentationCapturesStatusBarAppearance` 때문에 예약된 status bar 갱신)**을 그 자리에서 실행 → `UIHostingController.childForStatusBarHidden` → SwiftUI preference를 **같은 graph update 도중 재진입** 평가 → `GeometryReader`의 동적 content 때문에 layout이 필요 → slider가 한 번 더 생성. 결과: `UISlider` 2개(둘 다 frame 0, window 없음), 이후 어느 쪽도 `updateUIView`를 받지 못함(body 26–30회 vs update 2회).
+- 최소 재현(scratchpad, 커밋 안 함): 20줄 custom transition + `UIHostingController` + 공개 API만. 조건 3개 모두 있을 때만 freeze(update 2), 하나라도 끄면 정상(102/102): ① `GeometryReader` 안 조건부 content ② `modalPresentationCapturesStatusBarAppearance = true` ③ `animateTransition` 안 동기 `layoutIfNeeded()`. present 전에 미리 layout해도 freeze 유지.
+- 수정(`InteractivePlayerPresenter.swift`): `PlayerHostingController`(UIHostingController subclass)가 status bar를 UIKit에서 고정 — `childForStatusBar{Style,Hidden}` nil, `preferredStatusBarStyle .lightContent`, `prefersStatusBarHidden false`. Player는 항상 dark(`overrideUserInterfaceStyle = .dark`, `.preferredColorScheme(.dark)`)이고 status bar를 숨기는 modifier가 없으므로 외형 동일. 재현 앱에서도 같은 수정으로 102/102. transition·geometry·capture 설정은 그대로.
+- 검증(Simulator): 수정 전 bar fill 0/0/0 px, 수정 후 14 → 36 → 1067 px(2:54/−0:06, 97%)로 시간과 일치. Visual regression: artwork/queue 모드 row fingerprint가 리팩터링 후 승인본(`after_*`)과 일치(transport 2090–2200px = 715pt, reference IMG_4039 715pt), status bar light 유지. Simulator의 MPVolumeView 미표시는 기존 제약.
+- 실기기 regression(iPhone 15 Pro Max, 자동 점검 `YTM_PLAYER_TEST=1`, 2026-10-01): progress 막대 fill이 재생/일시정지(정지 구간 유지)/seek 60(440/1098px = 60/150.8)/next/previous에 맞게 변함. timeline: seek 다음 sample에 반영, 곡 전환 시 shown≠engine은 전환 순간 1 sample(0.1 s)만. volume row `volumeLayout` centred 8…36(system −5), 스크린샷 track 2433–2450px(승인본 2432–2452), transport 2090–2200px 동일, status bar light 유지. gapless: prefetched next, 자연 경계 `advanced` msAfterEnd 5 ms, `endedWithoutNext`·실패 0.
+- 사용자 수동 확인 [확인, 2026-10-01, 최종 build]: 하드웨어·Control Center 볼륨이 player 볼륨 막대에 반영, Lock Screen seek가 앱 막대·시간에 반영, background 복귀 후 막대·시간 일치, namitape megamix! 경계 click/gap 없음.
+
+정리 결과:
+- `FullPlayer.swift`(372 LOC, 6 타입) → 책임별 5파일: `FullPlayer.swift` 58(PlayerMode + composition), `PlayerMetrics.swift` 34(reference geometry), `PlayerControls.swift` 150(transport·volume row·mode row·sample notice), `PlayerProgress.swift` 90(위치·시간 label·scrub + `PlaybackProgressSlider` UIKit bridge, private), `SystemVolumeSlider.swift` 44(`MPVolumeView` bridge + `CenteredVolumeView`). 코드는 이동만(차이는 `private` → internal 3곳), 동작·geometry 동일(Simulator/iPhone row fingerprint 동일, 자동 점검 재통과: advanced 3 ms, shown≠engine 3/361 = 전환 순간).
+- DEBUG 전용으로 남긴 것: `PlayerSelfTest`(`YTM_PLAYER_TEST=1`), `PlaybackDiagnostics`(`Documents/playback.log`, 숫자·상태만), `volumeLayout` 기록. Release에는 기록 없음.
+
+다음 후보(사용자 승인 후 착수): Native Video, Song↔Video 전환. 알려진 follow-up: Eclipse 경계 64-sample 이슈(B3.3), repeat/autoplay 미지원(UI에서 비활성 표시).
+
+도구 메모: iPhone 화면은 `xcrun devicectl device capture screenshot --device <id> --destination <png>`로 직접 캡처 가능. 자동 점검 로그는 app container `Documents/playback.log`(DEBUG, 숫자·상태만).
+
 ## 9. 민감정보 / 정리
 
 - `~/.config/itprobe/`의 `browser-headers.itprobe-auth`(전체 로그인 세션), `oauth.itprobe-auth`(refresh token 포함), `oauth-client.env`, `oauth-client.env.save`(client secret)는 저장소 밖 파일이며 실험 후 삭제 권장. GCP OAuth client와 Google 계정의 앱 접근 권한도 해제 가능.

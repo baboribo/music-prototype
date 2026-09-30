@@ -55,7 +55,7 @@ struct CatalogPage<Value: Sendable, Content: View>: View {
 
 /// Album, Single and EP share Apple Music's release page; only the kind label differs.
 struct ReleaseDetailView: View {
-    @Environment(MockPlayer.self) private var player
+    @Environment(PlayerModel.self) private var player
     let detail: ReleaseDetail
 
     private var release: Release { detail.release }
@@ -132,7 +132,7 @@ extension Release {
 
 /// Same header grammar as releases; rows carry artwork because items differ in origin.
 struct PlaylistDetailView: View {
-    @Environment(MockPlayer.self) private var player
+    @Environment(PlayerModel.self) private var player
     @Environment(\.musicCatalog) private var catalog
     let detail: PlaylistDetail
     /// Rows fetched after the first page, as the list scrolls to its end.
@@ -238,7 +238,7 @@ struct PlaylistDetailView: View {
 
 /// Full-bleed hero, then the sections the artist page returned, in order.
 struct ArtistDetailView: View {
-    @Environment(MockPlayer.self) private var player
+    @Environment(PlayerModel.self) private var player
     @Environment(\.colorScheme) private var colorScheme
     @State private var subscribed = false
     @State private var showingAbout = false

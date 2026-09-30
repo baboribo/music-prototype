@@ -182,7 +182,7 @@ struct LibraryCategoryView: View {
 
 /// One library category; further pages load as the list reaches its end.
 private struct LibraryCategoryList: View {
-    @Environment(MockPlayer.self) private var player
+    @Environment(PlayerModel.self) private var player
     @Environment(\.musicCatalog) private var catalog
     let category: LibraryCategory
     @State private var items: [BrowseItem]
@@ -349,7 +349,7 @@ final class SearchHistory {
 }
 
 struct SearchView: View {
-    @Environment(MockPlayer.self) private var player
+    @Environment(PlayerModel.self) private var player
     @Environment(SearchHistory.self) private var history
     @Environment(\.musicCatalog) private var catalog
     @Environment(CatalogChanges.self) private var changes

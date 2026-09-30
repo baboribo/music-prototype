@@ -5,7 +5,7 @@ private enum AppTab: Hashable {
 }
 
 struct AppShell: View {
-    @Environment(MockPlayer.self) private var player
+    @Environment(PlayerModel.self) private var player
     @Environment(LibraryActions.self) private var actions
     @Environment(AccountSession.self) private var account
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -56,11 +56,19 @@ struct AppShell: View {
         // A new sign-in or a sign-out: account data on screen belongs to the previous session.
         .id(account.generation)
         .onChange(of: account.generation) {
+            player.reset()
             homePath = []
             libraryPath = []
             searchPath = []
         }
         .task { await account.refresh() }
+        #if DEBUG
+        .task {
+            guard PlayerSelfTest.isEnabled else { return }
+            PlayerSelfTest.openPlayer = { showingPlayer = true }
+            await PlayerSelfTest.run(player)
+        }
+        #endif
         .sheet(isPresented: Bindable(account).isPresentingSignIn, onDismiss: { Task { await account.signInClosed() } }) {
             NavigationStack {
                 account.signInView()
@@ -82,6 +90,11 @@ struct AppShell: View {
             Text(failure.message)
         }
         .sensoryFeedback(.error, trigger: actions.failure?.id) { _, new in new != nil }
+        .alert("재생할 수 없습니다", isPresented: Binding(get: { player.playbackFailure != nil }, set: { if !$0 { player.playbackFailure = nil } })) {
+            Button("확인", role: .cancel) {}
+        } message: {
+            Text(player.playbackFailure ?? "")
+        }
         .tabViewBottomAccessory(isEnabled: player.currentTrack != nil) {
             MiniPlayer {
                 showingPlayer = true

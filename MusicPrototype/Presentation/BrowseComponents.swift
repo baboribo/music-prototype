@@ -279,7 +279,7 @@ extension View {
 struct SongRow: View {
     enum Leading { case number(Int), artwork }
 
-    @Environment(MockPlayer.self) private var player
+    @Environment(PlayerModel.self) private var player
     @Environment(LibraryActions.self) private var actions
     @Environment(\.browseNavigate) private var navigate
     let track: Track
@@ -446,7 +446,7 @@ struct ItemTile: View {
 
 /// Horizontal, view-aligned shelf with the Apple peek; tracks play, everything else pushes.
 struct Shelf: View {
-    @Environment(MockPlayer.self) private var player
+    @Environment(PlayerModel.self) private var player
     let items: [BrowseItem]
     var tileWidth: CGFloat = BrowseMetrics.shelfTile
     /// Home cards' pin switches, by item id (long press).

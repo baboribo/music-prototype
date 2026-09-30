@@ -2,7 +2,7 @@ import SwiftUI
 
 /// One persistent artwork moves between the large stage and the scrolling Queue header.
 struct PlayerUpperContent: View {
-    @Environment(MockPlayer.self) private var player
+    @Environment(PlayerModel.self) private var player
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityPrefersCrossFadeTransitions) private var prefersCrossFade
@@ -15,7 +15,7 @@ struct PlayerUpperContent: View {
     @State private var queueScrollOffset: CGFloat = 0
 
     private static let compactEdge: CGFloat = 72
-    private static let compactLeading: CGFloat = 32
+    private static let compactLeading = PlayerMetrics.horizontalInset
     // Measured on the 430pt reference: large art top sits 30pt below the
     // upper region, and the title block starts 28pt below the art.
     private static let largeArtTop: CGFloat = 30
@@ -49,7 +49,7 @@ struct PlayerUpperContent: View {
             let compactRect = CGRect(x: Self.compactLeading, y: -queueScrollOffset, width: Self.compactEdge, height: Self.compactEdge)
             let artRect = showingQueue ? compactRect : largeRect
             // Paused art shrinks about its own center; the title block does not move.
-            let artScale: CGFloat = showingQueue ? 1 : (player.isPlaying ? 1 : 0.73)
+            let artScale: CGFloat = showingQueue ? 1 : (player.isPlaying ? 1 : PlayerMetrics.pausedArtworkScale)
             let identityTop = artRect.maxY + (showingQueue ? 12 : Self.identityGap)
             // Queue content hangs below whichever header is showing, so the
             // growing artwork pushes it down and the shrinking one pulls it up.
@@ -84,7 +84,7 @@ struct PlayerUpperContent: View {
                 }
 
                 if usesCrossFade {
-                    artwork(rect: largeRect, scale: player.isPlaying ? 1 : 0.73, compact: false, viewport: geometry.size)
+                    artwork(rect: largeRect, scale: player.isPlaying ? 1 : PlayerMetrics.pausedArtworkScale, compact: false, viewport: geometry.size)
                         .animation(.easeInOut(duration: 0.2)) { $0.opacity(showingQueue ? 0 : 1) }
                     artwork(rect: compactRect, scale: 1, compact: true, viewport: geometry.size)
                         .animation(.easeInOut(duration: 0.2)) { $0.opacity(showingQueue ? 1 : 0) }
@@ -126,7 +126,7 @@ struct PlayerUpperContent: View {
     @ViewBuilder
     private func largeIdentity(top: CGFloat, viewportHeight: CGFloat) -> some View {
         let identity = PlayerTrackIdentity(track: track, compact: false)
-            .padding(.leading, 32)
+            .padding(.leading, PlayerMetrics.horizontalInset)
             .padding(.trailing, 27)
             .background {
                 if let transitionContext {
@@ -196,7 +196,7 @@ struct PlayerUpperContent: View {
                     }
                 }
             }
-            .listRowInsets(EdgeInsets(top: 0, leading: 32, bottom: 12, trailing: 19))
+            .listRowInsets(EdgeInsets(top: 0, leading: PlayerMetrics.horizontalInset, bottom: 12, trailing: 19))
             .listRowSeparator(.hidden)
             .listRowBackground(Color.clear)
             .moveDisabled(true)
@@ -204,7 +204,7 @@ struct PlayerUpperContent: View {
             if player.upcomingItems.isEmpty && player.queueStatus == .idle {
                 Text("다음 곡이 없습니다")
                     .foregroundStyle(.white.opacity(0.65))
-                    .listRowInsets(EdgeInsets(top: 12, leading: 32, bottom: 12, trailing: 32))
+                    .listRowInsets(EdgeInsets(top: 12, leading: PlayerMetrics.horizontalInset, bottom: 12, trailing: PlayerMetrics.horizontalInset))
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
             } else {
@@ -230,9 +230,9 @@ struct PlayerUpperContent: View {
                     .opacity(item.isPlayable ? 1 : 0.4)
                     .accessibilityLabel("\(upcoming.title), \(upcoming.artist)")
                     .accessibilityValue(item.isPlayable ? "" : "재생할 수 없음")
-                    .accessibilityHint("이 곡부터 샘플 재생")
+                    .accessibilityHint("이 곡부터 재생")
                     .accessibilityIdentifier("queue.track.\(item.id)")
-                    .listRowInsets(EdgeInsets(top: 4, leading: 32, bottom: 4, trailing: 19))
+                    .listRowInsets(EdgeInsets(top: 4, leading: PlayerMetrics.horizontalInset, bottom: 4, trailing: 19))
                     .listRowSeparator(.hidden)
                     .listRowBackground(Color.clear)
                     // Radio/mix queues continue as the list reaches its end.
@@ -273,7 +273,7 @@ struct PlayerUpperContent: View {
                 Text(message).font(.footnote).foregroundStyle(.white.opacity(0.65))
                 Button("다시 시도") { player.retryQueue() }.buttonStyle(.bordered).tint(.white)
             }
-            .listRowInsets(EdgeInsets(top: 12, leading: 32, bottom: 12, trailing: 32))
+            .listRowInsets(EdgeInsets(top: 12, leading: PlayerMetrics.horizontalInset, bottom: 12, trailing: PlayerMetrics.horizontalInset))
             .listRowSeparator(.hidden)
             .listRowBackground(Color.clear)
             .moveDisabled(true)
@@ -284,15 +284,17 @@ struct PlayerUpperContent: View {
         HStack(spacing: 13) {
             queueOption("임의 재생", symbol: "shuffle", selected: player.isShuffling, action: player.toggleShuffle)
             queueOption("반복", symbol: "repeat", selected: player.isRepeating, action: player.toggleRepeat)
-                .accessibilityHint("샘플 반복 설정만 변경하며 오디오는 자동 재생되지 않습니다")
+                // Repeat is a fixture setting; the native engine doesn't repeat yet.
+                .disabled(player.isAudible)
+                .accessibilityHint(player.isAudible ? "반복 재생은 아직 지원하지 않습니다" : "샘플 반복 설정만 변경합니다")
             queueOption("자동 재생", symbol: "infinity", selected: false, action: {})
                 .disabled(true)
-                .accessibilityHint("샘플에서는 네트워크 추천을 이어 재생할 수 없습니다")
-            // Song ↔ Video on entries the service pairs; switches the queue state only (no audio yet).
+                .accessibilityHint("자동 재생은 아직 지원하지 않습니다")
+            // Song ↔ Video on entries the service pairs; fixtures only until native video exists.
             queueOption("곡 전환", symbol: "circle.lefthalf.filled", selected: player.isShowingCounterpart, action: player.switchVariant)
                 .disabled(!player.canSwitchVariant)
                 .accessibilityValue(player.canSwitchVariant ? (player.currentKind == .song ? "노래" : "동영상") : "")
-                .accessibilityHint("같은 항목의 노래와 동영상 사이를 전환합니다. 샘플에는 오디오 엔진이 없습니다")
+                .accessibilityHint("같은 항목의 노래와 동영상 사이를 전환합니다")
         }
     }
 
@@ -327,7 +329,7 @@ private struct QueueOptionToggle: View {
 }
 
 private struct PlayerTrackIdentity: View {
-    @Environment(MockPlayer.self) private var player
+    @Environment(PlayerModel.self) private var player
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let track: Track
     let compact: Bool

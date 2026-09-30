@@ -1,22 +1,22 @@
 import Observation
 import Foundation
 
-/// Queue state from the catalog with mock transport: no audio, timers, or system
-/// media session. The queue is the service's (`/next`) when the catalog is live,
-/// the fixtures' otherwise; playback itself stays local until the native player exists.
+/// The playback queue and its transport as the UI sees them. The queue (current entry, the
+/// service's order, shuffle/reorder, continuation, unplayable entries) is the source of truth;
+/// a `PlaybackEngine` plays the current entry and prepares the one expected next.
 @MainActor
 @Observable
-final class MockPlayer {
+final class PlayerModel {
     enum QueueStatus: Equatable {
         case idle
         case loading
         case failed(String)
     }
 
-    private(set) var isPlaying = false
-    // User-controlled fixture values only; position never advances on its own.
-    private(set) var position: Double = 0
+    /// Fixture volume (silent engine only); the native engine uses the system volume.
     private(set) var volume: Double = 0.65
+    /// A playback failure to tell the listener about once.
+    var playbackFailure: String?
 
     /// Entries in play order (after any shuffle or reorder).
     private var queue: [QueueItem] = []
@@ -41,11 +41,19 @@ final class MockPlayer {
 
     private let catalog: any MusicCatalog
     private let actions: LibraryActions
+    @ObservationIgnored let engine: any PlaybackEngine
 
-    init(catalog: any MusicCatalog, actions: LibraryActions) {
+    init(catalog: any MusicCatalog, actions: LibraryActions, engine: any PlaybackEngine) {
         self.catalog = catalog
         self.actions = actions
+        self.engine = engine
+        engine.delegate = self
     }
+
+    var isPlaying: Bool { engine.isPlaying }
+    var position: Double { engine.position }
+    /// Whether the transport produces real audio.
+    var isAudible: Bool { engine.isAudible }
 
     // MARK: Current entry
 
@@ -62,17 +70,19 @@ final class MockPlayer {
         return (isShowingCounterpart ? item.counterpart?.kind : nil) ?? item.primary.kind
     }
 
-    var canSwitchVariant: Bool { currentItem?.counterpart != nil }
+    /// Song ↔ Video media switching waits for native video; the native engine plays audio only.
+    var canSwitchVariant: Bool { currentItem?.counterpart != nil && engine.supportsVariantSwitch }
 
     /// Song ↔ Video on the same entry: the position carries over through the
     /// segment map (or restarts when it falls outside every segment).
     func switchVariant() {
-        guard let item = currentItem, item.counterpart != nil else { return }
+        guard let item = currentItem, canSwitchVariant else { return }
         let mapped = isShowingCounterpart
             ? item.segmentMap?.primaryPosition(forCounterpart: position)
             : item.segmentMap?.counterpartPosition(forPrimary: position)
         isShowingCounterpart.toggle()
-        position = min(mapped ?? 0, duration)
+        playCurrent(autoplay: isPlaying)
+        engine.seek(to: mapped ?? 0)
     }
 
     func isFavorite(_ id: Track.ID) -> Bool { actions.value(.like(id), given: likes[id]) == true }
@@ -116,6 +126,7 @@ final class MockPlayer {
             reordered = unshuffledOrder.filter { remainingIDs.contains($0.id) }
         }
         queue.replaceSubrange((selectedIndex + 1)..<queue.count, with: reordered)
+        syncUpcoming()
     }
 
     // A fixture repeat setting; there is no timer or automatic playback engine.
@@ -132,10 +143,12 @@ final class MockPlayer {
         queue.replaceSubrange((selectedIndex + 1)..<queue.count, with: remainder)
         unshuffledOrder = queue
         isShuffling = false
+        syncUpcoming()
     }
 
+    /// The media's own length once playing, else the service's listing.
     var duration: Double {
-        guard let value = currentTrack?.duration, value.isFinite else { return 0 }
+        guard let value = engine.duration ?? currentTrack?.duration, value.isFinite else { return 0 }
         return max(0, value)
     }
 
@@ -183,12 +196,12 @@ final class MockPlayer {
         continuation = nil
         isShuffling = false
         isShowingCounterpart = false
-        position = 0
         if let track {
             queue = [QueueItem(track: track)]
             unshuffledOrder = queue
             selectedIndex = 0
-            isPlaying = true
+            playCurrent(autoplay: true)
+            syncUpcoming()
         }
         load(seed)
     }
@@ -217,6 +230,7 @@ final class MockPlayer {
     /// current, and the position stays when that is still the same media.
     private func apply(_ page: QueuePage) {
         let previous = currentTrack?.id
+        let previousKey = currentItem?.id
         guard !page.items.isEmpty else { queueStatus = .idle; return }
         recordLikes(page.items)
         if let selected = page.selectedIndex, page.items[selected].isPlayable {
@@ -234,8 +248,13 @@ final class MockPlayer {
         isShowingCounterpart = false
         continuation = page.next
         queueStatus = .idle
-        if currentTrack?.id != previous { position = 0 }
-        isPlaying = true
+        // The same media keeps playing under the service's entry; other media starts over.
+        if let previousKey, currentTrack?.id == previous, let request = currentRequest {
+            engine.relabel(currentKey: previousKey, to: request)
+        } else {
+            playCurrent(autoplay: true)
+        }
+        syncUpcoming()
     }
 
     /// Next page of an infinite (radio/mix) queue; called when the list reaches its end.
@@ -252,6 +271,7 @@ final class MockPlayer {
                 queue += added
                 unshuffledOrder += added
                 continuation = page.next
+                syncUpcoming()
             } catch {
                 guard !Task.isCancelled else { return }
                 queueStatus = .failed(error.localizedDescription)
@@ -259,22 +279,21 @@ final class MockPlayer {
         }
     }
 
-    // MARK: Transport (mock)
+    // MARK: Transport
 
     func seek(position: Double) {
         guard position.isFinite, currentTrack != nil else { return }
-        self.position = min(max(position, 0), duration)
+        engine.seek(to: min(max(position, 0), duration))
     }
 
     // Selecting a visible Queue entry keeps the queue; unplayable entries can't be selected.
     func selectUpcoming(_ item: QueueItem) {
         guard item.isPlayable,
               let index = queue.indices.dropFirst(selectedIndex + 1).first(where: { queue[$0].id == item.id }) else { return }
-        select(index)
-        isPlaying = true
+        select(index, autoplay: true)
     }
 
-    // This does not change device or audio-session volume.
+    // Fixture volume only: this does not change device or audio-session volume.
     func setVolume(_ value: Double) {
         guard value.isFinite else { return }
         volume = min(max(value, 0), 1)
@@ -282,11 +301,10 @@ final class MockPlayer {
 
     func togglePlayPause() {
         guard currentItem != nil else { return }
-        isPlaying.toggle()
+        isPlaying ? engine.pause() : engine.resume()
     }
 
-    // Manual navigation preserves the current play/pause state; nothing auto-advances.
-    // Unplayable entries are skipped.
+    // Manual navigation preserves the current play/pause state. Unplayable entries are skipped.
     func next() {
         guard let index = queue.indices.dropFirst(selectedIndex + 1).first(where: { queue[$0].isPlayable }) else { return }
         select(index)
@@ -296,21 +314,99 @@ final class MockPlayer {
     func previous() {
         guard currentItem != nil else { return }
         if selectedIndex == 0 || position > 3 {
-            position = 0
+            engine.seek(to: 0)
         } else if let index = queue.indices.prefix(selectedIndex).last(where: { queue[$0].isPlayable }) {
             select(index)
         } else {
-            position = 0
+            engine.seek(to: 0)
         }
     }
 
-    private func select(_ index: Int) {
+    private func select(_ index: Int, autoplay: Bool? = nil) {
         let changed = index != selectedIndex
         selectedIndex = index
         if changed {
             isShowingCounterpart = false
-            position = 0
+            playCurrent(autoplay: autoplay ?? isPlaying)
+        } else if autoplay == true {
+            engine.resume()
         }
-        position = min(position, duration)
+        syncUpcoming()
     }
+
+    /// A sign-out or a new session: nothing from the previous session keeps playing.
+    func reset() {
+        loadTask?.cancel()
+        pageTask?.cancel()
+        engine.stop()
+        queue = []
+        unshuffledOrder = []
+        selectedIndex = 0
+        continuation = nil
+        lastSeed = nil
+        queueSource = nil
+        queueStatus = .idle
+        isShuffling = false
+        isShowingCounterpart = false
+    }
+
+    // MARK: Engine
+
+    private func request(for item: QueueItem, showingCounterpart: Bool = false) -> PlaybackRequest {
+        let track = (showingCounterpart ? item.counterpart?.track : nil) ?? item.primary.track
+        let artworkURL: URL? = if case .remote(let url) = track.artwork { url } else { nil }
+        return PlaybackRequest(key: showingCounterpart ? item.id + ".counterpart" : item.id, videoID: track.id,
+                               title: track.title, artist: track.artist, album: track.album,
+                               artworkURL: artworkURL, duration: track.duration)
+    }
+
+    private var currentRequest: PlaybackRequest? {
+        currentItem.map { request(for: $0, showingCounterpart: isShowingCounterpart) }
+    }
+
+    private func playCurrent(autoplay: Bool) {
+        guard let request = currentRequest else { return }
+        engine.play(request, autoplay: autoplay)
+    }
+
+    /// The next playable entry after the current one (what Next and the end of a track move to).
+    private var nextPlayableIndex: Int? {
+        queue.indices.dropFirst(selectedIndex + 1).first { queue[$0].isPlayable }
+    }
+
+    /// Tells the engine which entry to prepare; called after anything that can change it
+    /// (selection, shuffle, reorder, a new or longer queue).
+    private func syncUpcoming() {
+        engine.setUpcoming(nextPlayableIndex.map { request(for: queue[$0]) })
+    }
+}
+
+extension PlayerModel: PlaybackEngineDelegate {
+    func engineAdvanced(to key: String) {
+        // The prepared next entry is playing: follow it in the queue.
+        guard let index = queue.indices.dropFirst(selectedIndex + 1).first(where: { queue[$0].id == key }) else { return }
+        selectedIndex = index
+        isShowingCounterpart = false
+        if queue.count - selectedIndex < 5 { loadMoreQueue() }
+        syncUpcoming()
+    }
+
+    func engineReachedEnd(of key: String) {
+        guard currentItem?.id == key || currentRequest?.key == key else { return }
+        if let index = nextPlayableIndex {
+            select(index, autoplay: true)
+            if queue.count - selectedIndex < 5 { loadMoreQueue() }
+        } else {
+            engine.pause()
+            engine.seek(to: 0)
+        }
+    }
+
+    func engineFailed(_ key: String, message: String) {
+        guard currentRequest?.key == key else { return }
+        playbackFailure = message
+    }
+
+    func engineRequestedNext() { next() }
+    func engineRequestedPrevious() { previous() }
 }
