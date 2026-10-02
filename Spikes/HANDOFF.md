@@ -580,6 +580,27 @@ AccountSession (Domain, @Observable) ← AccountBackend(protocol) ← WebKitAcco
 
 도구 메모: iPhone 화면은 `xcrun devicectl device capture screenshot --device <id> --destination <png>`로 직접 캡처 가능. 자동 점검 로그는 app container `Documents/playback.log`(DEBUG, 숫자·상태만).
 
+### V0. Native Video feasibility (2026-10-03, 조사만 — 본 앱 미통합)
+대상: 기존 counterpart 쌍 밤편지 ATV `NnRjwEhFU70` ↔ **OMV `BzYnNdJhZQw`**(§5, `/next` primary·counterpart·segmentMap 기존 확인). 인증 = 기존 Premium session(macOS probe는 `ITPROBE_AUTH` 저장소 밖 cookie 파일, iPhone은 spike의 WebKit store). player JS `8ab5c328`, sts 20725. solver `yt-dlp/ejs` 0.8.0(hash 고정값 일치).
+
+`/player` WEB_REMIX (OMV, playability OK, 283 s) [확인, `itprobe video BzYnNdJhZQw <base.js> <solve.mjs> --auth`, 상태·숫자만 출력]:
+- muxed `formats` **1개: itag 18** `video/mp4; avc1.42001E + mp4a.40.2`, 640×360. `signatureCipher`, URL에 `n`.
+- adaptive video 12개: mp4 avc1 133/134/135/136/**137(1080p)**/160, webm vp9 242–248/278 — 전부 `signatureCipher` + `n`. adaptive audio 6개(140/141/249/250/251/774, cipher).
+- HLS·DASH manifest **없음**(WEB_REMIX), `serverAbrStreamingUrl` 있음(Audio와 동일). attestation·licenseInfos·drmParams·`drmFamilies` **없음**, `pot` 파라미터 **없음**.
+- bytes: itag 18 n 미변환 **403** → sig+n **206**(64 KiB). itag 137 n 미변환 403 → sig+n **206**, 중간 range 206. 즉 **Audio와 같은 sig+n resolver로 그대로 열림**, 추가 보호 계층 없음.
+- WEB_SAFARI HLS(`itprobe hls`/`solve`): master 200, **muxed** 6 variant(144p–1080p, avc1+mp4a). segment는 **n 미변환 403**, path `/n/<v>/`를 변환 값으로 교체하면 **200**. → AVPlayer에 주려면 모든 variant playlist의 segment URL을 재작성(resource loader 또는 local proxy) 필요 = stop 조건, 구현 안 함.
+
+Smoke [확인]:
+- macOS `AVPlayer`(muted, itag 18 sig+n URL): ready, 위치가 wall clock과 일치(15 s→14.9, 95 s→95.4), **duration 283 s 정확**(audio itag 141의 2배 오보고 없음 — progressive MP4), pause drift 0.00, seek 150/10 s 정상, 12 requests·6,288 KiB·stall 0·error 0.
+- **iPhone 15 Pro Max**(`WebPlayerSpike` Video 탭, `VideoSmoke.swift`, `VIDEO_SMOKE=1`): 기존 spike `PlaybackResolver.resolve(_:itags: [18])`(muxed `formats`도 검색하도록 itag 목록만 인자화) → `AVPlayer` → `AVPlayerLayer`. resolve(새 player라 solver full run 2.7 s 포함) 후 item ready, rate 1, 위치 1.0→62.0 s가 wall clock과 함께 증가, `presentationSize` 640×360, route Speaker, duration 283 s, 4 requests·6,288 KiB·stall 0·error 0. 스크린샷에서 영상 프레임 표시·변화 확인. 소리는 log상 speaker 출력(청감 미확인). 로그 `Documents/video.log`는 상태·숫자만.
+
+결론:
+- 후보 A — muxed itag 18 progressive MP4: **가능**. Audio와 동일한 cookie + `/player` + sig/n, AVPlayer가 그대로 재생(영상+소리+정확한 길이). 한계: **360p 고정**(muxed가 1개뿐).
+- 후보 B — adaptive avc1 video-only(최대 1080p) + adaptive AAC: bytes는 열리지만 영상·소리가 분리 → 같이 재생하려면 동기 결합 필요(=muxing/composition 단계). V0에서 중단.
+- 후보 C — WEB_SAFARI HLS(muxed 1080p까지): segment마다 n 변환이 들어간 playlist 재작성 필요 → V0에서 중단.
+- 최단 Native Video 경로 = **후보 A**(새 보호 계층·POT·DRM·SABR·muxer·HLS rewrite 모두 불필요).
+- 리셋 후 첫 구현 단계(사용자 승인 후): production `PlaybackResolver`에 format 선택(audio 141/140 vs video 18)만 추가 → 별도 video engine/`AVPlayerLayer` surface에서 counterpart 1곡 재생(Song↔Video 전환·segmentMap·queue 통합 전). 고화질은 그 다음 B(AVMutableComposition 등 결합 검토) 또는 C(HLS playlist 재작성) 중 선택 필요.
+
 ## 9. 민감정보 / 정리
 
 - `~/.config/itprobe/`의 `browser-headers.itprobe-auth`(전체 로그인 세션), `oauth.itprobe-auth`(refresh token 포함), `oauth-client.env`, `oauth-client.env.save`(client secret)는 저장소 밖 파일이며 실험 후 삭제 권장. GCP OAuth client와 Google 계정의 앱 접근 권한도 해제 가능.

@@ -106,7 +106,8 @@ actor PlaybackResolver {
         return try await body()
     }
 
-    func resolve(_ videoID: String) async throws -> ResolvedAudio {
+    /// `itags`: audio by default; the V0 video smoke passes the muxed itag 18 (`streamingData.formats`).
+    func resolve(_ videoID: String, itags: [Int] = preferredItags) async throws -> ResolvedAudio {
         var phase: [String: Int] = [:]
         let player = try await timed("playerJS", &phase) { try await playerJS.current() }
         let root = try await timed("player", &phase) { try await playerResponse(videoID, sts: player.signatureTimestamp) }
@@ -114,8 +115,9 @@ actor PlaybackResolver {
         guard playability?["status"] as? String == "OK" else {
             throw ResolutionError.unplayable(playability?["status"] as? String ?? "?")
         }
-        let formats = root.dict("streamingData")?["adaptiveFormats"] as? [[String: Any]] ?? []
-        guard let format = Self.preferredItags.lazy.compactMap({ itag in formats.first { $0["itag"] as? Int == itag } }).first,
+        let streaming = root.dict("streamingData")
+        let formats = (streaming?["adaptiveFormats"] as? [[String: Any]] ?? []) + (streaming?["formats"] as? [[String: Any]] ?? [])
+        guard let format = itags.lazy.compactMap({ itag in formats.first { $0["itag"] as? Int == itag } }).first,
               let itag = format["itag"] as? Int else { throw ResolutionError.noAudioFormat }
 
         // Collect both challenges first; one solver call per resolve.

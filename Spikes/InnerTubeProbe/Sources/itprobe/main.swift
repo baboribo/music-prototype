@@ -151,6 +151,12 @@ case "solve":
     lines.forEach { print($0) }
     if args.contains("--play"), let playable { await AVPlaybackTest.run(playable, label: "\(id) itag 141 sig+n") }
     if args.contains("--mp4"), let playable { (await MP4Header.describe(playable)).forEach { print("  mp4 " + $0) } }
+case "video":
+    // video <videoId> <base.js> <solve.mjs> --auth [--play] : V0 native video feasibility, statuses only.
+    let (id, playerPath, solver) = (args[1], args[2], args[3])
+    let (lines, muxed) = await VideoProbe.run(transport, videoID: id, playerPath: playerPath, solver: solver)
+    lines.forEach { print($0) }
+    if args.contains("--play"), let muxed { await AVPlaybackTest.run(muxed, label: "\(id) muxed") }
 case "pcm":
     // pcm <idA> <idB> <base.js> <solve.mjs> --auth : gapless boundary A→B in decoded PCM (numbers only).
     let (idA, idB, playerPath, solver) = (args[1], args[2], args[3], args[4])

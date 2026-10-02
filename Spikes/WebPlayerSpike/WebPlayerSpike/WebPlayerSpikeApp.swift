@@ -23,10 +23,12 @@ struct SpikeRoot: View {
             Tab("Auth", systemImage: "person.badge.key", value: "auth") { AuthE2EView() }
             Tab("Player", systemImage: "play", value: "player") { SpikeView() }
             Tab("Audio", systemImage: "waveform", value: "audio") { NativeAudioView() }
+            Tab("Video", systemImage: "film", value: "video") { VideoSmokeView() }
         }
         .onAppear {
             let env = ProcessInfo.processInfo.environment
             if env["SPIKE_AUDIOTEST"] == "1" || env["SPIKE_LATENCYTEST"] == "1" || env["SPIKE_GAPTEST"] == "1" { tab = "audio" }
+            if env["VIDEO_SMOKE"] == "1" { tab = "video" }
         }
     }
 }
